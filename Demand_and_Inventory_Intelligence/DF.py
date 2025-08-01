@@ -483,7 +483,7 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time)
+                        arrival_date = current_date + timedelta(days=int(lead_time)) # Fix: Convert numpy.int64 to int
                         
                         # Place order with the upstream location
                         demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
@@ -512,7 +512,7 @@ def run_full_simulation(
                 if not lead_time_df_dc.empty:
                     lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
                     destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=lead_time)
+                    arrival_date = current_date + timedelta(days=int(lead_time)) # Fix: Convert numpy.int64 to int
                     
                     incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
 
@@ -542,9 +542,8 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time_up)
+                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Fix: Convert numpy.int64 to int
                         
-                        # Place order with the factory
                         # We'll just add it to incoming shipments for now as factories have different logic
                         
                         incoming_shipments.setdefault(arrival_date, {}).setdefault((location, item), []).append(order_qty)
@@ -778,7 +777,6 @@ if run_simulation_button:
                 fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
                 
                 # Add forecast start line
-                # FIX: Convert Timestamp to datetime object to avoid TypeError in plotly's internal calculations
                 if not df_sales.empty and 'Date' in df_sales.columns:
                     fig.add_vline(x=df_sales['Date'].max().to_pydatetime(), line_dash="dash", line_color="red", annotation_text="Forecast Start", annotation_position="top right")
                 else:
