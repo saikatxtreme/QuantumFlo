@@ -480,7 +480,7 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time)
+                        arrival_date = current_date + timedelta(days=int(lead_time)) # Fixed: Cast to int
                         
                         # Place order with the upstream location
                         demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
@@ -509,7 +509,7 @@ def run_full_simulation(
                 if not lead_time_df_dc.empty:
                     lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
                     destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=lead_time)
+                    arrival_date = current_date + timedelta(days=int(lead_time)) # Fixed: Cast to int
                     
                     incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
 
@@ -539,7 +539,7 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time_up)
+                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Fixed: Cast to int
                         
                         # Place order with the factory
                         # We'll just add it to incoming shipments for now as factories have different logic
