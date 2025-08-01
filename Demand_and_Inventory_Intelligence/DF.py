@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
 import random
-from sklearn.model_selection import train_test_split
+from sklearn.model_model_selection import train_test_split
 from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
@@ -40,6 +40,7 @@ DEFAULT_DISTRIBUTION_CENTERS = [f"DC-{chr(ord('A') + i)}" for i in range(2)]
 DEFAULT_RETAIL_STORES = [f"Store-{chr(ord('A') + i)}" for i in range(3)]
 DEFAULT_LOCATIONS = DEFAULT_FACTORIES + DEFAULT_DISTRIBUTION_CENTERS + DEFAULT_RETAIL_STORES
 
+@st.cache_data
 def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, num_stores, network_type):
     """
     Generates a complete set of realistic dummy dataframes for the app.
@@ -227,6 +228,15 @@ def get_csv_download_link(df, filename):
     b64_csv = base64.b64encode(csv_string.encode()).decode()
     href = f'<a href="data:text/csv;base64,{b64_csv}" download="{filename}">Download {filename}</a>'
     return href
+
+@st.cache_data
+def load_csv_data(uploaded_file_buffer):
+    """
+    Loads a CSV file from an uploaded file buffer and caches it.
+    """
+    if uploaded_file_buffer is not None:
+        return pd.read_csv(uploaded_file_buffer)
+    return pd.DataFrame()
 
 def calculate_safety_stock_kings(df_demand, lead_time_days, service_level):
     """
@@ -660,11 +670,8 @@ if data_source == "Upload Custom Data":
         
         uploaded_file = st.sidebar.file_uploader(label, type="csv", key=filename)
         if uploaded_file is not None:
-            try:
-                uploaded_data[filename] = pd.read_csv(uploaded_file)
-            except Exception as e:
-                st.error(f"Error loading {filename}: {e}")
-                uploaded_data[filename] = pd.DataFrame()
+            # Use the cached load_csv_data function
+            uploaded_data[filename] = load_csv_data(uploaded_file)
         elif not is_optional:
             st.warning(f"Required file '{filename}' is missing.")
             uploaded_data[filename] = pd.DataFrame()
