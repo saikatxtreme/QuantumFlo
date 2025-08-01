@@ -391,7 +391,7 @@ def suggest_indent_orders(df_inventory_latest, df_forecast, df_lead_times, safet
 
         # Calculate demand during lead time from forecast
         # This considers the actual forecasted demand for the lead time period
-        forecast_end_date_for_lead_time = current_simulation_date + timedelta(days=lead_time_days)
+        forecast_end_date_for_lead_time = current_simulation_date + timedelta(days=int(lead_time_days)) # Cast to int
         demand_during_lead_time_df = df_item_location_forecast[
             (df_item_location_forecast['Date'] > current_simulation_date) & 
             (df_item_location_forecast['Date'] <= forecast_end_date_for_lead_time)
@@ -571,7 +571,7 @@ def run_full_simulation(
                         # Target stock to cover demand during lead time + safety stock
                         # Get forecast for the next `lead_time` days starting from current_date
                         forecast_period_start = current_date + timedelta(days=1)
-                        forecast_period_end = current_date + timedelta(days=lead_time)
+                        forecast_period_end = current_date + timedelta(days=int(lead_time)) # Cast to int
                         
                         demand_during_lead_time_forecast = df_forecast[
                             (df_forecast['Date'] >= forecast_period_start) & 
@@ -653,7 +653,7 @@ def run_full_simulation(
                         
                         # Get forecast for the next `lead_time_up` days for DC's downstream demand
                         forecast_period_start_dc = current_date + timedelta(days=1)
-                        forecast_period_end_dc = current_date + timedelta(days=lead_time_up)
+                        forecast_period_end_dc = current_date + timedelta(days=int(lead_time_up)) # Cast to int
                         
                         demand_during_lead_time_forecast_dc = df_forecast[
                             (df_forecast['Date'] >= forecast_period_start_dc) & 
