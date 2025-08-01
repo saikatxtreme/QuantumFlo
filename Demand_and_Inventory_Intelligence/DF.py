@@ -10,6 +10,8 @@
 # - Ensured consistent int() casting for timedelta days component.
 # - NEW: Added a dedicated "How it's Calculated" section for business users.
 # - NEW: Added a download button to export simulation results as CSV.
+# - FIX: Addressed TypeError when df_sales['Date'].max() is called on empty data,
+#        by adding a check before drawing the forecast start vline.
 
 import streamlit as st
 import pandas as pd
@@ -708,13 +710,22 @@ def _process_upstream_orders_and_reorders(current_date, inventory_levels, reorde
                     # This logic needs to be more robust for component demand. For simplicity,
                     # base component demand on overall forecast for parent SKUs using this component.
                     parent_skus = df_bom[df_bom['Component_ID'] == item_id]['Parent_SKU_ID'].unique()
+                    component_demand_data = []
                     for p_sku in parent_skus:
                         qty_req = df_bom[(df_bom['Parent_SKU_ID'] == p_sku) & (df_bom['Component_ID'] == item_id)]['Quantity_Required'].iloc[0]
                         # Assuming factory produces SKUs for overall forecast demand
-                        sku_forecast = df_forecast[(df_forecast['SKU_ID'] == p_sku) & (df_forecast['Location'] == loc)]['Sales_Quantity'].mean()
-                        if pd.isna(sku_forecast): sku_forecast = 0
+                        sku_forecast = df_forecast[(df_forecast['SKU_ID'] == p_sku) & (df_forecast['Location'] == loc)]
+                        if not sku_forecast.empty:
+                            component_demand_data.append(sku_forecast[['Date', 'Sales_Quantity']].copy())
+                            component_demand_data[-1]['Sales_Quantity'] *= qty_req
 
-                        demand_during_lead_time_forecast += sku_forecast * qty_req * lead_time # Simplified projection
+                    if component_demand_data:
+                        # Combine and sum up sales quantities for the component's demand
+                        temp_df = pd.concat(component_demand_data)
+                        temp_df = temp_df[(temp_df['Date'] >= forecast_period_start) & (temp_df['Date'] <= forecast_period_end)]
+                        demand_during_lead_time_forecast = temp_df['Sales_Quantity'].sum()
+                    else:
+                        demand_during_lead_time_forecast = 0
                 else: # Factory needs to produce a finished good itself (likely based on DC orders)
                      # Sum demand from all DCs this factory supplies for this finished good
                     downstream_locations = df_lead_times[
@@ -914,18 +925,24 @@ def run_full_simulation(
     bom_quantity_map = df_bom.set_index(['Parent_SKU_ID', 'Component_ID'])['Quantity_Required'].to_dict()
 
     # Generate forecast demand for the simulation period
-    forecast_start_date = df_sales['Date'].max() + timedelta(days=1)
+    forecast_start_date = df_sales['Date'].max() + timedelta(days=1) if not df_sales.empty and not df_sales['Date'].empty else start_date
     forecast_end_date = end_date
     forecast_days = (forecast_end_date - forecast_start_date).days + 1
     
     df_forecast = pd.DataFrame()
-    if forecast_days > 0:
+    if forecast_days > 0 and not df_sales.empty: # Only forecast if there's historical sales data to learn from
         st.info(f"Generating a {forecast_days}-day demand forecast using {forecast_model}...")
         df_forecast = forecast_demand(df_sales, forecast_model, forecast_days, ma_window_size)
+    elif df_sales.empty:
+        st.warning("Cannot generate forecast as historical sales data is empty.")
     else:
         st.info("No future forecast period defined. Simulation runs only on historical data.")
         
     # Combine historical and forecast data for simulation
+    # Ensure 'Sales_Quantity' column exists in df_sales before concatenating
+    if 'Sales_Quantity' not in df_sales.columns and not df_sales.empty:
+        df_sales['Sales_Quantity'] = 0 # Or handle appropriately if sales data might truly lack quantities
+
     df_sim_demand = pd.concat([df_sales, df_forecast]).sort_values('Date').reset_index(drop=True)
     
     # Pre-calculate Safety Stock and Reorder Points for all relevant item-location pairs
@@ -1176,8 +1193,8 @@ if run_simulation_button and validation_passed: # Only run if validation passed 
         df_actual_shipments = all_dfs.get("actual_shipments.csv", pd.DataFrame())
 
         # Determine simulation start and end dates
-        sim_start_date = df_sales['Date'].min()
-        sim_end_date = df_sales['Date'].max() + timedelta(days=simulation_days)
+        sim_start_date = df_sales['Date'].min() if not df_sales.empty and not df_sales['Date'].empty else DEFAULT_START_DATE
+        sim_end_date = (df_sales['Date'].max() if not df_sales.empty and not df_sales['Date'].empty else DEFAULT_START_DATE) + timedelta(days=simulation_days)
 
         # Run the full simulation
         simulation_results = run_full_simulation(
@@ -1260,7 +1277,13 @@ if run_simulation_button and validation_passed: # Only run if validation passed 
                 fig_forecast = px.line(df_combined_demand, x="Date", y="Demand", color='Type', 
                                        title=f"Demand for {selected_item_forecast} at {selected_location_forecast}",
                                        markers=True)
-                fig_forecast.add_vline(x=df_sales['Date'].max(), line_width=2, line_dash="dash", line_color="red", annotation_text="Forecast Start")
+                
+                # FIX: Add check for df_sales and its 'Date' column before adding vline
+                if not df_sales.empty and 'Date' in df_sales.columns and not df_sales['Date'].empty:
+                    fig_forecast.add_vline(x=df_sales['Date'].max(), line_width=2, line_dash="dash", line_color="red", annotation_text="Forecast Start")
+                else:
+                    st.warning("Cannot show forecast start line as historical sales data is empty or missing dates.")
+                
                 st.plotly_chart(fig_forecast, use_container_width=True)
             else:
                 st.info("No forecast data to display for the selected item and location.")
