@@ -443,7 +443,8 @@ def run_multi_echelon_simulation(sales_df, inventory_df, component_inventory_df,
     kpi_data = []
     
     # Get all dates in the simulation period
-    all_dates = pd.to_datetime(sales_df['Date'].unique()).sort_values()
+   	all_dates = np.sort(pd.to_datetime(sales_df['Date'].unique()))
+
     
     # Initialize a dictionary to hold daily inventory levels and orders
     current_inventory = {}
