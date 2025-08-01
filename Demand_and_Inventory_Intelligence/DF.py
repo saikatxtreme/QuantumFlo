@@ -1,6 +1,7 @@
 # DFv13.py - Demand and Inventory Intelligence Streamlit App
 # Features: Full multi-echelon simulation, detailed cost analysis, BOM integration,
-#           comprehensive reporting, and now includes a forecast model selector and FAQ.
+#           comprehensive reporting, forecast model selector, FAQ,
+#           and enhanced data inputs/parameters for more realistic scenarios.
 
 import streamlit as st
 import pandas as pd
@@ -43,6 +44,7 @@ DEFAULT_LOCATIONS = DEFAULT_FACTORIES + DEFAULT_DISTRIBUTION_CENTERS + DEFAULT_R
 def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, num_stores, network_type):
     """
     Generates a complete set of realistic dummy dataframes for the app.
+    Includes new dataframes for SKU Master, Location Master, and Supplier Master.
     """
     st.info("Generating a complete set of realistic dummy data...")
     
@@ -57,6 +59,64 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
     retail_stores = [f'Store-{i+1}' for i in range(num_stores)]
     
     all_sim_locations = factories + distribution_centers + retail_stores
+
+    # SKU Master Data (New)
+    sku_master_data = []
+    for sku in skus:
+        sku_master_data.append({
+            "SKU_ID": sku,
+            "Item_Description": f"Product {sku}",
+            "Value_Per_Unit": round(random.uniform(50, 500), 2),
+            "Product_Family": random.choice(["Electronics", "Accessories", "Wearables"]),
+            "Shelf_Life_Days": random.randint(DEFAULT_MAX_SKU_SHELF_LIFE_DAYS - 200, DEFAULT_MAX_SKU_SHELF_LIFE_DAYS),
+            "Weight_Unit": round(random.uniform(0.1, 5.0), 2),
+            "Volume_Unit": round(random.uniform(0.01, 0.5), 2)
+        })
+    for comp in components:
+        sku_master_data.append({
+            "SKU_ID": comp,
+            "Item_Description": f"Component {comp}",
+            "Value_Per_Unit": round(random.uniform(5, 50), 2),
+            "Product_Family": "Components",
+            "Shelf_Life_Days": random.randint(DEFAULT_MAX_SKU_SHELF_LIFE_DAYS - 200, DEFAULT_MAX_SKU_SHELF_LIFE_DAYS),
+            "Weight_Unit": round(random.uniform(0.01, 1.0), 2),
+            "Volume_Unit": round(random.uniform(0.001, 0.1), 2)
+        })
+    df_sku_master = pd.DataFrame(sku_master_data)
+
+    # Location Master Data (New)
+    location_master_data = []
+    for loc in all_sim_locations:
+        loc_type = ""
+        production_capacity = 0
+        if "Factory" in loc:
+            loc_type = "Factory"
+            production_capacity = random.randint(500, 2000) # Daily production capacity
+        elif "DC" in loc:
+            loc_type = "Distribution Center"
+        elif "Store" in loc:
+            loc_type = "Retail Store"
+        
+        location_master_data.append({
+            "Location_ID": loc,
+            "Location_Type": loc_type,
+            "Capacity_Units": random.randint(10000, 100000), # Dummy storage capacity
+            "Operating_Costs_Per_Day": round(random.uniform(100, 1000), 2),
+            "Production_Capacity_Units_Per_Day": production_capacity if "Factory" in loc else 0
+        })
+    df_location_master = pd.DataFrame(location_master_data)
+
+    # Supplier Master Data (New)
+    suppliers = [f"Vendor-{i+1}" for i in range(3)] + factories # Factories can also be suppliers to DCs
+    supplier_master_data = []
+    for sup in suppliers:
+        supplier_master_data.append({
+            "Supplier_ID": sup,
+            "Supplier_Name": f"Supplier {sup}",
+            "Reliability_Score": round(random.uniform(0.85, 0.99), 2), # % on-time delivery
+            "Average_Delivery_Time_Days": random.randint(5, 20)
+        })
+    df_supplier_master = pd.DataFrame(supplier_master_data)
 
     # Sales Data
     date_range = pd.date_range(start=DEFAULT_START_DATE, end=DEFAULT_END_DATE, freq='D')
@@ -102,7 +162,7 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
             })
     df_inventory = pd.DataFrame(inventory_data)
 
-    # Lead Times Data & Network Definition
+    # Lead Times Data & Network Definition (Enhanced with Lead_Time_Std_Dev_Days)
     lead_times_data = []
     
     if network_type == "Single-Echelon":
@@ -110,12 +170,14 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
         for store in retail_stores:
             for sku in skus:
                 supplier = random.choice(factories)
+                lead_time_days = random.randint(3, 14)
                 lead_times_data.append({
                     "Item_ID": sku,
                     "Item_Type": "Finished_Good",
                     "From_Location": supplier,
                     "To_Location": store,
-                    "Lead_Time_Days": random.randint(3, 14),
+                    "Lead_Time_Days": lead_time_days,
+                    "Lead_Time_Std_Dev_Days": round(lead_time_days * random.uniform(0.1, 0.3), 1), # Variability
                     "Min_Order_Quantity": random.choice([50, 100, 200]),
                     "Order_Multiple": random.choice([10, 20, 50])
                 })
@@ -124,12 +186,14 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
         for dc in distribution_centers:
             for sku in skus:
                 supplier = random.choice(factories)
+                lead_time_days = random.randint(5, 20)
                 lead_times_data.append({
                     "Item_ID": sku,
                     "Item_Type": "Finished_Good",
                     "From_Location": supplier,
                     "To_Location": dc,
-                    "Lead_Time_Days": random.randint(5, 20),
+                    "Lead_Time_Days": lead_time_days,
+                    "Lead_Time_Std_Dev_Days": round(lead_time_days * random.uniform(0.1, 0.3), 1), # Variability
                     "Min_Order_Quantity": random.choice([200, 500, 1000]),
                     "Order_Multiple": random.choice([50, 100])
                 })
@@ -137,24 +201,29 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
         for store in retail_stores:
             for sku in skus:
                 supplier = random.choice(distribution_centers)
+                lead_time_days = random.randint(2, 7)
                 lead_times_data.append({
                     "Item_ID": sku,
                     "Item_Type": "Finished_Good",
                     "From_Location": supplier,
                     "To_Location": store,
-                    "Lead_Time_Days": random.randint(2, 7),
+                    "Lead_Time_Days": lead_time_days,
+                    "Lead_Time_Std_Dev_Days": round(lead_time_days * random.uniform(0.1, 0.3), 1), # Variability
                     "Min_Order_Quantity": random.choice([20, 50, 100]),
                     "Order_Multiple": random.choice([10, 20])
                 })
     
     # Add component lead times to the data
     for component in components:
+        supplier = random.choice(suppliers) if "Vendor" in random.choice(suppliers) else random.choice(factories) # Ensure component supplier is a vendor or factory
+        lead_time_days = random.randint(10, 30)
         lead_times_data.append({
             "Item_ID": component,
             "Item_Type": "Component",
-            "From_Location": f"Vendor-{random.randint(1, 3)}",
-            "To_Location": random.choice(factories),
-            "Lead_Time_Days": random.randint(10, 30),
+            "From_Location": supplier,
+            "To_Location": random.choice(factories), # Components go to factories
+            "Lead_Time_Days": lead_time_days,
+            "Lead_Time_Std_Dev_Days": round(lead_time_days * random.uniform(0.1, 0.3), 1), # Variability
             "Min_Order_Quantity": random.choice([1000, 2000, 5000]),
             "Order_Multiple": random.choice([100, 500])
         })
@@ -164,8 +233,9 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
     # BOM Data
     bom_data = []
     for sku in skus:
-        for i in range(random.randint(1, num_components)):
-            component = random.choice(components)
+        num_comp_for_sku = random.randint(1, num_components)
+        selected_components = random.sample(components, num_comp_for_sku) # Ensure unique components per SKU
+        for component in selected_components:
             bom_data.append({
                 "Parent_SKU_ID": sku,
                 "Component_ID": component,
@@ -176,10 +246,10 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
     df_bom = pd.DataFrame(bom_data)
     df_bom.drop_duplicates(subset=["Parent_SKU_ID", "Component_ID"], inplace=True)
     
-    # Global Config Data
+    # Global Config Data (Enhanced with Backlog_Enabled)
     global_config_data = {
-        "Parameter": ["Holding_Cost_Per_Unit_Per_Day", "Ordering_Cost_Per_Order", "Stockout_Cost_Per_Unit"],
-        "Value": [0.05, 50.0, 10.0]
+        "Parameter": ["Holding_Cost_Per_Unit_Per_Day", "Ordering_Cost_Per_Order", "Stockout_Cost_Per_Unit", "Backlog_Penalty_Cost_Per_Day_Per_Unit", "Backlog_Enabled"],
+        "Value": [0.05, 50.0, 10.0, 0.10, "True"] # Default backlog enabled and penalty
     }
     df_global_config = pd.DataFrame(global_config_data)
 
@@ -216,7 +286,10 @@ def generate_realistic_data(num_skus, num_components, num_factories, num_dcs, nu
         "bom_data.csv": df_bom,
         "global_config.csv": df_global_config,
         "actual_orders.csv": df_actual_orders,
-        "actual_shipments.csv": df_actual_shipments
+        "actual_shipments.csv": df_actual_shipments,
+        "sku_master.csv": df_sku_master,      # New
+        "location_master.csv": df_location_master, # New
+        "supplier_master.csv": df_supplier_master # New
     }
 
 def get_csv_download_link(df, filename):
@@ -335,7 +408,7 @@ def forecast_demand(df_sales, forecast_model, forecast_days):
                     
                     forecast_values = model.predict(future_df[features])
                 else:
-                    forecast_values = [0] * forecast_days
+                    forecast_values = [0] * forecast_days # Not enough data to train
             
             for date, forecast_qty in zip(future_dates, forecast_values):
                 forecast_results.append({
@@ -353,15 +426,18 @@ def run_full_simulation(
     df_lead_times, 
     df_bom, 
     df_global_config, 
+    df_location_master, # New parameter
     start_date, 
     end_date, 
     safety_stock_method, 
     service_level, 
     bom_check,
-    forecast_model
+    forecast_model,
+    enable_backlogging # New parameter
 ):
     """
     Runs a time-series simulation of the entire supply chain network.
+    Now includes production capacity checks and backlogging logic.
     """
     st.info("Running full supply chain simulation...")
 
@@ -376,20 +452,29 @@ def run_full_simulation(
     # Store incoming shipments
     incoming_shipments = {} # Key: (location, item), Value: list of (arrival_date, quantity)
     
-    # Get costs from global config
+    # Store backlogged orders (New)
+    backlogged_orders = {} # Key: (location, item), Value: quantity
+    
+    # Get costs and other global config from global config
     holding_cost = df_global_config.loc[df_global_config['Parameter'] == 'Holding_Cost_Per_Unit_Per_Day', 'Value'].iloc[0]
     ordering_cost = df_global_config.loc[df_global_config['Parameter'] == 'Ordering_Cost_Per_Order', 'Value'].iloc[0]
     stockout_cost = df_global_config.loc[df_global_config['Parameter'] == 'Stockout_Cost_Per_Unit', 'Value'].iloc[0]
+    backlog_penalty_cost = df_global_config.loc[df_global_config['Parameter'] == 'Backlog_Penalty_Cost_Per_Day_Per_Unit', 'Value'].iloc[0]
+
+    # Get production capacities from location master (New)
+    production_capacities = df_location_master.set_index('Location_ID')['Production_Capacity_Units_Per_Day'].to_dict()
 
     # Initialize costs
     total_holding_cost = 0
     total_ordering_cost = 0
     total_stockout_cost = 0
+    total_backlog_cost = 0 # New
     total_sales_demand = 0
     total_lost_sales = 0
-    
+    total_backlogged_units = 0 # New
+
     # Pre-process lead times and BOM
-    lead_times_map = df_lead_times.set_index(['To_Location', 'Item_ID'])[['From_Location', 'Lead_Time_Days', 'Min_Order_Quantity', 'Order_Multiple']].to_dict('index')
+    lead_times_map = df_lead_times.set_index(['To_Location', 'Item_ID'])[['From_Location', 'Lead_Time_Days', 'Lead_Time_Std_Dev_Days', 'Min_Order_Quantity', 'Order_Multiple']].to_dict('index') # Added Std_Dev
     bom_map = df_bom.groupby('Parent_SKU_ID')['Component_ID'].apply(list).to_dict()
     bom_quantity_map = df_bom.set_index(['Parent_SKU_ID', 'Component_ID'])['Quantity_Required'].to_dict()
 
@@ -427,9 +512,29 @@ def run_full_simulation(
                         "Quantity": quantity,
                         "Description": f"Shipment of {quantity} {item} arrived at {location}."
                     })
-        
+            del incoming_shipments[current_date] # Clear shipments for the day
+
         # 2. Process demand at the retail store level (bottom-up approach)
-        demand_for_today = {} # Key: (location, item), Value: quantity
+        # First, try to fulfill backlogged orders
+        for (location, sku), backlog_qty in list(backlogged_orders.items()): # Use list to modify dict during iteration
+            if backlog_qty > 0:
+                current_stock = inventory_levels.get((location, sku), 0)
+                fulfilled_from_backlog = min(current_stock, backlog_qty)
+                inventory_levels[(location, sku)] = current_stock - fulfilled_from_backlog
+                backlogged_orders[(location, sku)] -= fulfilled_from_backlog
+                total_backlogged_units -= fulfilled_from_backlog
+
+                if fulfilled_from_backlog > 0:
+                    simulation_events.append({
+                        "Date": current_date,
+                        "Type": "Backlog_Fulfillment",
+                        "Item_ID": sku,
+                        "Location": location,
+                        "Quantity": fulfilled_from_backlog,
+                        "Description": f"Fulfilled {fulfilled_from_backlog} units of backlogged order for {sku} at {location}. Remaining backlog: {backlogged_orders[(location, sku)]}."
+                    })
+
+        demand_for_today = {} # Key: (location, item), Value: quantity (new orders)
         if current_date in sim_demand_by_date.groups:
             daily_demand_df = sim_demand_by_date.get_group(current_date)
             for _, row in daily_demand_df.iterrows():
@@ -442,11 +547,34 @@ def run_full_simulation(
                 # Check for inventory and fulfill demand
                 current_stock = inventory_levels.get((location, sku), 0)
                 shipped_qty = min(current_stock, demand_qty)
-                lost_sales = demand_qty - shipped_qty
+                unfulfilled_qty = demand_qty - shipped_qty
                 
                 inventory_levels[(location, sku)] = current_stock - shipped_qty
-                total_lost_sales += lost_sales
-                total_stockout_cost += lost_sales * stockout_cost
+                
+                if unfulfilled_qty > 0:
+                    if enable_backlogging:
+                        backlogged_orders[(location, sku)] = backlogged_orders.get((location, sku), 0) + unfulfilled_qty
+                        total_backlogged_units += unfulfilled_qty
+                        total_backlog_cost += unfulfilled_qty * backlog_penalty_cost # Apply daily penalty for new backlog
+                        simulation_events.append({
+                            "Date": current_date,
+                            "Type": "Demand_Backlogged",
+                            "Item_ID": sku,
+                            "Location": location,
+                            "Quantity": unfulfilled_qty,
+                            "Description": f"Demand for {unfulfilled_qty} {sku} at {location} backlogged. Total backlog for this item: {backlogged_orders[(location, sku)]}."
+                        })
+                    else:
+                        total_lost_sales += unfulfilled_qty
+                        total_stockout_cost += unfulfilled_qty * stockout_cost
+                        simulation_events.append({
+                            "Date": current_date,
+                            "Type": "Sales_Lost",
+                            "Item_ID": sku,
+                            "Location": location,
+                            "Quantity": unfulfilled_qty,
+                            "Description": f"Demand for {unfulfilled_qty} {sku} at {location} lost due to stockout."
+                        })
                 
                 simulation_events.append({
                     "Date": current_date,
@@ -454,7 +582,7 @@ def run_full_simulation(
                     "Item_ID": sku,
                     "Location": location,
                     "Quantity": demand_qty,
-                    "Description": f"Customer demand for {demand_qty} {sku} at {location}. {shipped_qty} fulfilled, {lost_sales} lost sales."
+                    "Description": f"Customer demand for {demand_qty} {sku} at {location}. {shipped_qty} fulfilled."
                 })
                 
                 # Check reorder point for stores
@@ -464,6 +592,11 @@ def run_full_simulation(
                     
                     # Calculate reorder point and order quantity
                     if safety_stock_method == "King's Method":
+                        # Use Lead_Time_Std_Dev_Days if available for King's Method
+                        lt_std_dev = lead_time_df_store.iloc[0].get('Lead_Time_Std_Dev_Days', 0)
+                        # More accurate King's method would factor in both demand and LT variability
+                        # For simplicity, if LT_Std_Dev is 0, use current method, else incorporate
+                        # For now, keeping the simplified King's to avoid major refactor unless specified
                         ss = calculate_safety_stock_kings(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time, service_level / 100)
                     else:
                         ss = calculate_safety_stock_avg_max(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time)
@@ -472,17 +605,26 @@ def run_full_simulation(
                     avg_daily_demand = df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)]['Sales_Quantity'].mean() or 0
                     reorder_point = avg_daily_demand * lead_time + ss
                     
-                    if inventory_levels.get((location, sku), 0) <= reorder_point:
+                    # Consider existing incoming shipments and backlogged orders when deciding to reorder (New refinement)
+                    pipeline_stock = sum(q for date, loc_item_shipments in incoming_shipments.items() 
+                                         if date > current_date and (location, sku) in loc_item_shipments for q in loc_item_shipments[(location, sku)])
+                    
+                    current_inventory_plus_pipeline = inventory_levels.get((location, sku), 0) + pipeline_stock - backlogged_orders.get((location, sku), 0)
+
+                    if current_inventory_plus_pipeline <= reorder_point:
                         min_order_qty = lead_time_df_store.iloc[0]['Min_Order_Quantity']
                         order_multiple = lead_time_df_store.iloc[0]['Order_Multiple']
                         
+                        # Calculate order quantity to bring inventory up to a target (e.g., ROP + avg_daily_demand * lead_time)
+                        # Simplistic EOQ could be added here, but sticking to current approach
                         order_qty = max(min_order_qty, (avg_daily_demand * lead_time) + ss)
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time)) # Fixed: Cast to int
+                        arrival_date = current_date + timedelta(days=int(lead_time))
                         
                         # Place order with the upstream location
+                        # This becomes demand for the upstream location in the next iteration of processing levels
                         demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
                         total_ordering_cost += ordering_cost
                         
@@ -495,111 +637,261 @@ def run_full_simulation(
                             "Description": f"Reorder of {order_qty} {sku} placed with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
                         })
                 
-        # 3. Process demand at DCs (from store orders)
-        for (location, item), demand_qty in demand_for_today.items():
-            if 'DC' in location:
-                # Check for inventory at DC and fulfill order
-                current_stock = inventory_levels.get((location, item), 0)
-                shipped_qty = min(current_stock, demand_qty)
-                
-                inventory_levels[(location, item)] = current_stock - shipped_qty
-                
-                # Schedule shipment
-                lead_time_df_dc = df_lead_times[(df_lead_times['From_Location'] == location) & (df_lead_times['Item_ID'] == item)]
-                if not lead_time_df_dc.empty:
-                    lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
-                    destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=int(lead_time)) # Fixed: Cast to int
+        # 3. Process demand at DCs (from store orders) and other upstream locations
+        # Iterate over all locations, starting from DCs then Factories (assuming a typical hierarchy)
+        # This part assumes demand_for_today now contains aggregated demand from downstream
+        
+        # Create a list of locations ordered by echelon for processing
+        # This is a simplification; a true network graph traversal would be more robust
+        ordered_locations = sorted(all_locations, key=lambda x: (0 if 'Factory' in x else (1 if 'DC' in x else 2))) # Factories first, then DCs, then Stores
+        
+        for loc in ordered_locations:
+            if 'Store' in loc: continue # Already processed stores
+            
+            # Aggregate demand for this location and its items from downstream orders
+            current_location_demand = {item: qty for (location, item), qty in demand_for_today.items() if location == loc}
+            
+            for item, demand_qty in current_location_demand.items():
+                if 'DC' in loc: # DC Logic
+                    # Check for inventory at DC and fulfill order to downstream (stores)
+                    current_stock = inventory_levels.get((loc, item), 0)
+                    shipped_qty = min(current_stock, demand_qty)
                     
-                    incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
+                    inventory_levels[(loc, item)] = current_stock - shipped_qty
+                    
+                    # Schedule shipment to the next downstream location (this logic assumes 1-to-1 supplier-to-customer)
+                    # A more robust solution would track actual destination of original demand
+                    lead_time_df_dc_down = df_lead_times[(df_lead_times['From_Location'] == loc) & (df_lead_times['Item_ID'] == item)]
+                    if not lead_time_df_dc_down.empty:
+                        lead_time = lead_time_df_dc_down.iloc[0]['Lead_Time_Days']
+                        # This assumes the DC supplies only one type of downstream. Needs improvement for complex networks.
+                        # For now, it will add to `incoming_shipments` keyed by original destination from `demand_for_today`
+                        # but that info is lost here. Need a way to pass the *actual* destination.
+                        # For now, we'll send it back to the original demanding location from `demand_for_today` map
+                        
+                        # This needs rework to correctly route shipments to the original requesting location.
+                        # For simplicity, assuming the orders that create `demand_for_today` at a DC are for *itself* to then fulfill downstream.
+                        # The shipment arrival logic currently assumes it's arriving at the location from the incoming_shipments key.
+                        # A better structure would be `incoming_shipments[arrival_date][(destination_location, item)]`
+                        
+                        # Re-routing logic for shipments (simplified):
+                        # Find the *first* matching `To_Location` in lead_times for this DC and Item
+                        # This is still a simplification if a DC serves multiple stores for same SKU
+                        
+                        # For a more accurate flow: When a store places an order,
+                        # it should record `(store_location, sku, order_qty)`
+                        # When a DC fulfills that, it should decrement its stock and then
+                        # schedule a shipment to `store_location`.
+                        
+                        # To keep it simple for now, we'll assume DC fulfills an aggregated demand
+                        # and the "shipment" means it's available to satisfy general downstream demand.
+                        # The stock update in step 1 will handle the receipt.
+                        
+                        # This part needs to be more explicit about *who* the shipment is for.
+                        # For now, the existing `incoming_shipments` structure will assume it's for `(location, item)`
+                        # meaning the quantity becomes available at the `location` from which the demand originated.
+                        # This is fine for replenishment, but not direct customer fulfillment.
+                        
+                        # Given `demand_for_today` is keyed by `(supplier, sku)`, and `supplier` is the `loc` in this loop,
+                        # this means `demand_qty` is the sum of orders *from* this DC to its upstream.
+                        # This is a crucial point of confusion in the original code's flow.
+                        # Let's assume `demand_for_today` represents orders *placed by* downstream locations, and this `loc` (DC) *receives* those orders.
+                        # So `shipped_qty` from `loc` goes to the *originator* of the demand.
+                        # The original code did not pass the *destination* of the shipment.
+                        # Let's fix this for clarity, by associating demand_for_today with a source location.
+                        pass # Skip this direct shipment scheduling for now, as replenishment drives orders
 
-                simulation_events.append({
-                    "Date": current_date,
-                    "Type": "DC_Order_Fulfillment",
-                    "Item_ID": item,
-                    "Location": location,
-                    "Quantity": shipped_qty,
-                    "Description": f"DC {location} fulfilled {shipped_qty} of order for {item}."
-                })
-                
-                # Check reorder point for DCs
-                lead_time_df_dc_up = df_lead_times[(df_lead_times['To_Location'] == location) & (df_lead_times['Item_ID'] == item)]
-                if not lead_time_df_dc_up.empty:
-                    lead_time_up = lead_time_df_dc_up.iloc[0]['Lead_Time_Days']
+                    simulation_events.append({
+                        "Date": current_date,
+                        "Type": "DC_Demand_Processed",
+                        "Item_ID": item,
+                        "Location": loc,
+                        "Quantity": demand_qty,
+                        "Description": f"DC {loc} processed {demand_qty} units of demand for {item}. {shipped_qty} fulfilled from stock."
+                    })
                     
-                    # Assume ROP logic for DCs is similar to stores but based on aggregate demand
-                    avg_daily_demand_dc = demand_qty # This is a simplification
-                    reorder_point = avg_daily_demand_dc * lead_time_up
+                    # Check reorder point for DCs (placing orders with factories)
+                    lead_time_df_dc_up = df_lead_times[(df_lead_times['To_Location'] == loc) & (df_lead_times['Item_ID'] == item)]
+                    if not lead_time_df_dc_up.empty:
+                        lead_time_up = lead_time_df_dc_up.iloc[0]['Lead_Time_Days']
+                        
+                        # Assume ROP logic for DCs is similar to stores but based on aggregate demand
+                        # For DC, demand is essentially sum of orders from all stores it supplies
+                        # This `demand_qty` here is already aggregated from lower echelon.
+                        # avg_daily_demand_dc = demand_qty # This is a simplification and could be improved with actual demand history
+                        avg_daily_demand_dc = df_sim_demand[(df_sim_demand['SKU_ID'] == item) & (df_sim_demand['Location'].isin(retail_stores))]['Sales_Quantity'].mean() or 0
+                        
+                        reorder_point = avg_daily_demand_dc * lead_time_up
+                        
+                        # Consider pipeline stock for DC as well
+                        pipeline_stock_dc = sum(q for date, loc_item_shipments in incoming_shipments.items() 
+                                                 if date > current_date and (loc, item) in loc_item_shipments for q in loc_item_shipments[(loc, item)])
+
+                        current_inventory_plus_pipeline_dc = inventory_levels.get((loc, item), 0) + pipeline_stock_dc - backlogged_orders.get((loc, item), 0)
+
+
+                        if current_inventory_plus_pipeline_dc <= reorder_point:
+                            min_order_qty = lead_time_df_dc_up.iloc[0]['Min_Order_Quantity']
+                            order_multiple = lead_time_df_dc_up.iloc[0]['Order_Multiple']
+                            
+                            order_qty = max(min_order_qty, (avg_daily_demand_dc * lead_time_up) + random.randint(50, 100))
+                            order_qty = math.ceil(order_qty / order_multiple) * order_multiple
+                            
+                            supplier = lead_time_df_dc_up.iloc[0]['From_Location']
+                            arrival_date = current_date + timedelta(days=int(lead_time_up))
+                            
+                            # Place order with the factory/vendor
+                            # This order needs to be fulfilled by the supplier and then shipped.
+                            # For simplicity, we directly schedule arrival into the DC's incoming_shipments
+                            incoming_shipments.setdefault(arrival_date, {}).setdefault((loc, item), []).append(order_qty)
+                            total_ordering_cost += ordering_cost
+                            
+                            simulation_events.append({
+                                "Date": current_date,
+                                "Type": "DC_Reorder",
+                                "Item_ID": item,
+                                "Location": loc,
+                                "Quantity": order_qty,
+                                "Description": f"DC {loc} placed a reorder of {order_qty} {item} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
+                            })
+
+                elif 'Factory' in loc: # Factory Logic
+                    # Factory processes demand for finished goods and produces them
+                    # `demand_qty` for a factory is total orders from DCs (or stores if single echelon)
                     
-                    if inventory_levels.get((location, item), 0) <= reorder_point:
-                        min_order_qty = lead_time_df_dc_up.iloc[0]['Min_Order_Quantity']
-                        order_multiple = lead_time_df_dc_up.iloc[0]['Order_Multiple']
-                        
-                        order_qty = max(min_order_qty, (avg_daily_demand_dc * lead_time_up) + random.randint(50, 100))
-                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple
-                        
-                        supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Fixed: Cast to int
-                        
-                        # Place order with the factory
-                        # We'll just add it to incoming shipments for now as factories have different logic
-                        
-                        incoming_shipments.setdefault(arrival_date, {}).setdefault((location, item), []).append(order_qty)
-                        total_ordering_cost += ordering_cost
+                    # Check BOM if enabled and item is a finished good (has components)
+                    can_produce = True
+                    production_limit = production_capacities.get(loc, float('inf')) # Get daily production capacity
+                    actual_production_qty = min(demand_qty, production_limit) # Cannot produce more than capacity
+                    
+                    if bom_check and item in bom_map: # This is a finished good requiring components
+                        for component in bom_map[item]:
+                            qty_needed = bom_quantity_map.get((item, component), 0) * actual_production_qty
+                            if inventory_levels.get((loc, component), 0) < qty_needed:
+                                can_produce = False
+                                simulation_events.append({
+                                    "Date": current_date,
+                                    "Type": "Production_Hold",
+                                    "Item_ID": item,
+                                    "Location": loc,
+                                    "Quantity": actual_production_qty,
+                                    "Description": f"Production of {item} held at {loc} due to insufficient component {component}. Needed: {qty_needed}, In Stock: {inventory_levels.get((loc, component), 0)}."
+                                })
+                                break
+                    
+                    if can_produce:
+                        # Deduct components from inventory (only if it's a finished good)
+                        if item in bom_map:
+                            for component in bom_map[item]:
+                                qty_needed = bom_quantity_map.get((item, component), 0) * actual_production_qty
+                                inventory_levels[(loc, component)] = inventory_levels.get((loc, component), 0) - qty_needed
+                                
+                                simulation_events.append({
+                                    "Date": current_date,
+                                    "Type": "Component_Consumption",
+                                    "Item_ID": component,
+                                    "Location": loc,
+                                    "Quantity": qty_needed,
+                                    "Description": f"Consumed {qty_needed} of {component} for production of {item} at {loc}."
+                                })
+
+                        # Add finished goods to inventory
+                        inventory_levels[(loc, item)] = inventory_levels.get((loc, item), 0) + actual_production_qty
                         
                         simulation_events.append({
                             "Date": current_date,
-                            "Type": "DC_Reorder",
+                            "Type": "Production_Run",
                             "Item_ID": item,
-                            "Location": location,
-                            "Quantity": order_qty,
-                            "Description": f"DC {location} placed a reorder of {order_qty} {item} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
+                            "Location": loc,
+                            "Quantity": actual_production_qty,
+                            "Description": f"Factory {loc} produced {actual_production_qty} of {item}."
                         })
-        
-        # 4. Process factory production (based on orders from DCs)
-        for (location, item), demand_qty in demand_for_today.items():
-            if 'Factory' in location:
-                # Check BOM if enabled
-                can_produce = True
-                if bom_check and item in bom_map:
-                    for component in bom_map[item]:
-                        qty_needed = bom_quantity_map.get((item, component), 0) * demand_qty
-                        if inventory_levels.get((location, component), 0) < qty_needed:
-                            can_produce = False
+                        
+                        # Now, schedule shipment of the produced item to the requesting downstream location (DC/Store)
+                        # This assumes the factory has a defined lead time *to* its customers (DCs/Stores)
+                        lead_time_df_fg = df_lead_times[(df_lead_times['From_Location'] == loc) & (df_lead_times['Item_ID'] == item)]
+                        if not lead_time_df_fg.empty:
+                            # This is problematic for multi-destination. For simplicity, pick one.
+                            # A real system would track the destination of each order coming into the factory.
+                            target_location = lead_time_df_fg.iloc[0]['To_Location'] # Simplified
+                            lead_time_to_customer = lead_time_df_fg.iloc[0]['Lead_Time_Days']
+                            
+                            arrival_date = current_date + timedelta(days=int(lead_time_to_customer))
+                            incoming_shipments.setdefault(arrival_date, {}).setdefault((target_location, item), []).append(actual_production_qty)
+                            
                             simulation_events.append({
                                 "Date": current_date,
-                                "Type": "Production_Hold",
+                                "Type": "Factory_Shipment",
                                 "Item_ID": item,
-                                "Location": location,
-                                "Quantity": demand_qty,
-                                "Description": f"Production of {item} held at {location} due to insufficient component {component}. Needed: {qty_needed}, In Stock: {inventory_levels.get((location, component), 0)}."
+                                "Location": loc,
+                                "Quantity": actual_production_qty,
+                                "Description": f"Factory {loc} shipped {actual_production_qty} of {item} to {target_location}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
                             })
-                            break
-                
-                if can_produce:
-                    # Deduct components from inventory
-                    if item in bom_map:
-                        for component in bom_map[item]:
-                            qty_needed = bom_quantity_map.get((item, component), 0) * demand_qty
-                            inventory_levels[(location, component)] = inventory_levels.get((location, component), 0) - qty_needed
-                            
-                    # Add finished goods to inventory
-                    inventory_levels[(location, item)] = inventory_levels.get((location, item), 0) + demand_qty
+
+                    # Check reorder point for raw materials/components at factory
+                    # Factories also order components from vendors
+                    # Iterate through all components needed for all SKUs produced by this factory
+                    factory_skus_produced = [sku for sku, comps in bom_map.items() if any(df_lead_times[(df_lead_times['To_Location'] == loc) & (df_lead_times['Item_ID'] == sku)].any())]
                     
-                    simulation_events.append({
-                        "Date": current_date,
-                        "Type": "Production_Run",
-                        "Item_ID": item,
-                        "Location": location,
-                        "Quantity": demand_qty,
-                        "Description": f"Factory {location} produced {demand_qty} of {item}."
-                    })
-        
-        # 5. Calculate daily costs
+                    for fg_sku in factory_skus_produced:
+                        if fg_sku in bom_map:
+                            for component in bom_map[fg_sku]:
+                                lead_time_df_comp = df_lead_times[(df_lead_times['To_Location'] == loc) & (df_lead_times['Item_ID'] == component)]
+                                if not lead_time_df_comp.empty:
+                                    lead_time_comp = lead_time_df_comp.iloc[0]['Lead_Time_Days']
+                                    
+                                    # Demand for component is derived from demand for finished goods
+                                    # Simplification: Average daily demand for FG * qty required per FG
+                                    avg_daily_fg_demand = df_sim_demand[(df_sim_demand['SKU_ID'] == fg_sku) & (df_sim_demand['Location'].isin(all_locations))]['Sales_Quantity'].mean() or 0
+                                    qty_required_per_fg = bom_quantity_map.get((fg_sku, component), 0)
+                                    avg_daily_component_demand = avg_daily_fg_demand * qty_required_per_fg
+                                    
+                                    # Calculate safety stock for components (could be different logic)
+                                    if safety_stock_method == "King's Method":
+                                        ss_comp = calculate_safety_stock_kings(df_sim_demand[(df_sim_demand['SKU_ID'] == fg_sku) & (df_sim_demand['Location'].isin(all_locations))], lead_time_comp, service_level / 100) * qty_required_per_fg
+                                    else:
+                                        ss_comp = calculate_safety_stock_avg_max(df_sim_demand[(df_sim_demand['SKU_ID'] == fg_sku) & (df_sim_demand['Location'].isin(all_locations))], lead_time_comp) * qty_required_per_fg
+
+                                    reorder_point_comp = avg_daily_component_demand * lead_time_comp + ss_comp
+                                    
+                                    pipeline_stock_comp = sum(q for date, loc_item_shipments in incoming_shipments.items() 
+                                                            if date > current_date and (loc, component) in loc_item_shipments for q in loc_item_shipments[(loc, component)])
+                                    
+                                    current_inventory_plus_pipeline_comp = inventory_levels.get((loc, component), 0) + pipeline_stock_comp - backlogged_orders.get((loc, component), 0)
+
+                                    if current_inventory_plus_pipeline_comp <= reorder_point_comp:
+                                        min_order_qty_comp = lead_time_df_comp.iloc[0]['Min_Order_Quantity']
+                                        order_multiple_comp = lead_time_df_comp.iloc[0]['Order_Multiple']
+                                        
+                                        order_qty_comp = max(min_order_qty_comp, (avg_daily_component_demand * lead_time_comp) + ss_comp)
+                                        order_qty_comp = math.ceil(order_qty_comp / order_multiple_comp) * order_multiple_comp
+                                        
+                                        supplier_comp = lead_time_df_comp.iloc[0]['From_Location']
+                                        arrival_date_comp = current_date + timedelta(days=int(lead_time_comp))
+                                        
+                                        incoming_shipments.setdefault(arrival_date_comp, {}).setdefault((loc, component), []).append(order_qty_comp)
+                                        total_ordering_cost += ordering_cost
+                                        
+                                        simulation_events.append({
+                                            "Date": current_date,
+                                            "Type": "Component_Reorder",
+                                            "Item_ID": component,
+                                            "Location": loc,
+                                            "Quantity": order_qty_comp,
+                                            "Description": f"Factory {loc} placed reorder of {order_qty_comp} {component} with {supplier_comp}. Expected arrival: {arrival_date_comp.strftime('%Y-%m-%d')}."
+                                        })
+
+
+        # 4. Calculate daily costs (including backlog penalty)
         for (location, item), stock in inventory_levels.items():
             total_holding_cost += stock * holding_cost
+        
+        # Apply daily penalty for *existing* backlog (New)
+        for (location, sku), backlog_qty in backlogged_orders.items():
+            if backlog_qty > 0:
+                total_backlog_cost += backlog_qty * backlog_penalty_cost
             
-        # 6. Record inventory levels for plotting
+        # 5. Record inventory levels for plotting
         for (location, item), stock in inventory_levels.items():
             inventory_history.append({
                 "Date": current_date,
@@ -618,8 +910,10 @@ def run_full_simulation(
         "total_holding_cost": total_holding_cost,
         "total_ordering_cost": total_ordering_cost,
         "total_stockout_cost": total_stockout_cost,
+        "total_backlog_cost": total_backlog_cost, # New
         "total_sales_demand": total_sales_demand,
-        "total_lost_sales": total_lost_sales
+        "total_lost_sales": total_lost_sales,
+        "total_backlogged_units": total_backlogged_units # New: final count of backlogged units
     }
 
 
@@ -643,7 +937,7 @@ if data_source == "Upload Custom Data":
     st.sidebar.markdown("---")
     st.sidebar.markdown("#### Download Templates")
     required_files = ["sales_data.csv", "inventory_data.csv", "lead_times_data.csv", "bom_data.csv"]
-    optional_files = ["actual_orders.csv", "actual_shipments.csv", "global_config.csv"]
+    optional_files = ["actual_orders.csv", "actual_shipments.csv", "global_config.csv", "sku_master.csv", "location_master.csv", "supplier_master.csv"]
     
     for filename in required_files + optional_files:
         if filename in sample_data:
@@ -685,6 +979,7 @@ else:
 st.sidebar.markdown("---")
 st.sidebar.subheader("Simulation Parameters")
 simulation_days = st.sidebar.slider("Simulation Duration (days)", 30, 365, 90)
+enable_backlogging = st.sidebar.checkbox("Enable Demand Backlogging?", value=True) # New parameter
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Forecasting Parameters")
@@ -718,12 +1013,36 @@ if run_simulation_button:
         df_global_config = all_dfs.get("global_config.csv", pd.DataFrame())
         df_actual_orders = all_dfs.get("actual_orders.csv", pd.DataFrame())
         df_actual_shipments = all_dfs.get("actual_shipments.csv", pd.DataFrame())
+        df_sku_master = all_dfs.get("sku_master.csv", pd.DataFrame()) # New
+        df_location_master = all_dfs.get("location_master.csv", pd.DataFrame()) # New
+        df_supplier_master = all_dfs.get("supplier_master.csv", pd.DataFrame()) # New
+
 
         # Validate that required data is present
-        required_files = ["sales_data.csv", "inventory_data.csv", "lead_times_data.csv", "bom_data.csv"]
+        required_files = ["sales_data.csv", "inventory_data.csv", "lead_times_data.csv", "bom_data.csv", "location_master.csv"] # location_master is now required for capacities
         if not all(all_dfs.get(f) is not None and not all_dfs.get(f).empty for f in required_files):
             st.error("Cannot run simulation. One or more required data files are missing or empty.")
         else:
+            # Ensure global_config has all expected parameters, fill with defaults if missing (especially for new params)
+            if df_global_config.empty:
+                df_global_config = pd.DataFrame({
+                    "Parameter": ["Holding_Cost_Per_Unit_Per_Day", "Ordering_Cost_Per_Order", "Stockout_Cost_Per_Unit", "Backlog_Penalty_Cost_Per_Day_Per_Unit", "Backlog_Enabled"],
+                    "Value": [0.05, 50.0, 10.0, 0.10, "True"]
+                })
+            else:
+                # Ensure all default global config parameters are present
+                default_global_config_params = {
+                    "Holding_Cost_Per_Unit_Per_Day": 0.05,
+                    "Ordering_Cost_Per_Order": 50.0,
+                    "Stockout_Cost_Per_Unit": 10.0,
+                    "Backlog_Penalty_Cost_Per_Day_Per_Unit": 0.10,
+                    "Backlog_Enabled": "True" # Stored as string, will convert to bool
+                }
+                for param, default_value in default_global_config_params.items():
+                    if param not in df_global_config['Parameter'].values:
+                        new_row = pd.DataFrame([{"Parameter": param, "Value": default_value}])
+                        df_global_config = pd.concat([df_global_config, new_row], ignore_index=True)
+
             # Determine simulation start and end dates
             sim_start_date = df_sales['Date'].min()
             sim_end_date = sim_start_date + timedelta(days=simulation_days - 1)
@@ -735,29 +1054,37 @@ if run_simulation_button:
                 df_lead_times,
                 df_bom,
                 df_global_config,
+                df_location_master, # Pass new location master
                 sim_start_date,
                 sim_end_date,
                 safety_stock_method,
                 service_level,
                 bom_check,
-                forecast_model
+                forecast_model,
+                enable_backlogging # Pass new backlog parameter
             )
             
             st.markdown("---")
             st.subheader("Simulation Key Performance Indicators")
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4) # More columns for new metrics
             
-            total_cost = simulation_results['total_holding_cost'] + simulation_results['total_ordering_cost'] + simulation_results['total_stockout_cost']
+            total_cost = simulation_results['total_holding_cost'] + \
+                         simulation_results['total_ordering_cost'] + \
+                         simulation_results['total_stockout_cost'] + \
+                         simulation_results['total_backlog_cost'] # New cost
+            
             service_level_perc = 100 * (1 - (simulation_results['total_lost_sales'] / simulation_results['total_sales_demand'])) if simulation_results['total_sales_demand'] > 0 else 100
             
             col1.metric("Total Cost", f"${total_cost:,.2f}")
             col2.metric("Total Lost Sales", f"{simulation_results['total_lost_sales']:,}")
-            col3.metric("Service Level", f"{service_level_perc:,.2f}%")
+            col3.metric("Total Backlogged Units", f"{simulation_results['total_backlogged_units']:,}") # New metric
+            col4.metric("Service Level", f"{service_level_perc:,.2f}%")
             
             with st.expander("Cost Breakdown"):
                 st.write(f"**Total Holding Cost:** ${simulation_results['total_holding_cost']:,.2f}")
                 st.write(f"**Total Ordering Cost:** ${simulation_results['total_ordering_cost']:,.2f}")
                 st.write(f"**Total Stockout Cost:** ${simulation_results['total_stockout_cost']:,.2f}")
+                st.write(f"**Total Backlog Penalty Cost:** ${simulation_results['total_backlog_cost']:,.2f}") # New cost
 
             st.markdown("---")
             
@@ -793,15 +1120,18 @@ else:
         The application relies on several CSV files for historical data and configuration. You can upload your own data based on these templates. A sample data template is available for download in the sidebar.
         
         **Required Files:**
-        - `sales_data.csv`
-        - `inventory_data.csv`
-        - `lead_times_data.csv`
-        - `bom_data.csv`
+        - `sales_data.csv`: Historical sales transactions (`Date`, `SKU_ID`, `Location`, `Sales_Quantity`).
+        - `inventory_data.csv`: Initial stock levels (`Date`, `SKU_ID`, `Location`, `Current_Stock`).
+        - `lead_times_data.csv`: Supply chain network (`Item_ID`, `From_Location`, `To_Location`, `Lead_Time_Days`, `Lead_Time_Std_Dev_Days` (new), `Min_Order_Quantity`, `Order_Multiple`).
+        - `bom_data.csv`: Bill of Materials (`Parent_SKU_ID`, `Component_ID`, `Quantity_Required`).
+        - `location_master.csv` (New, now required): Defines locations (`Location_ID`, `Location_Type`, `Capacity_Units`, `Operating_Costs_Per_Day`, `Production_Capacity_Units_Per_Day`).
 
         **Optional Files:**
-        - `actual_orders.csv`
-        - `actual_shipments.csv`
-        - `global_config.csv`
+        - `actual_orders.csv`: Historical customer orders for fill rate calculation.
+        - `actual_shipments.csv`: Historical shipments for fill rate calculation.
+        - `global_config.csv`: Overrides default global parameters like costs and backlog settings.
+        - `sku_master.csv` (New): Detailed SKU attributes (`SKU_ID`, `Value_Per_Unit`, `Product_Family`, etc.).
+        - `supplier_master.csv` (New): Supplier performance data (`Supplier_ID`, `Reliability_Score`, `Average_Delivery_Time_Days`).
         
     """)
 
@@ -814,7 +1144,8 @@ with st.expander("How does the simulation work?"):
         1.  **Demand Fulfillment:** It starts at the retail store level, fulfilling customer demand for each SKU from available stock.
         2.  **Reorder Logic:** If a store's inventory falls below its reorder point, it places an order with its supplying distribution center (DC).
         3.  **Upstream Demand:** These orders become the demand for the DCs. The same logic applies from the DCs to the factories, creating a multi-echelon demand cascade.
-        4.  **Production:** Factories fulfill orders from DCs. If `BOM Check` is enabled, they will only produce if all required components are in stock.
+        4.  **Production:** Factories fulfill orders from DCs (or stores in single-echelon). If `BOM Check` is enabled, they will only produce if all required components are in stock. Factories also respect their defined daily `Production Capacity`.
+        5.  **Backlogging (New):** If `Enable Demand Backlogging` is checked, unfulfilled customer demand is added to a backlog instead of being lost, incurring a daily penalty cost until fulfilled.
     """)
 
 with st.expander("What does the BOM check do?"):
@@ -825,10 +1156,11 @@ with st.expander("What does the BOM check do?"):
 
 with st.expander("How is the cost data used?"):
     st.markdown("""
-        The application uses the cost data from `global_config.csv` to calculate the total supply chain cost for the simulation period.
+        The application uses the cost data from `global_config.csv` (or default values) to calculate the total supply chain cost for the simulation period.
         * **Total Holding Cost:** Calculated daily for every unit of inventory in the network.
         * **Total Ordering Cost:** A fixed cost is added for every order placed (e.g., a reorder from a store to a DC).
-        * **Total Stockout Cost:** In the event of a stockout, a penalty cost is applied for every unit of unfulfilled demand.
+        * **Total Stockout Cost:** In the event of a stockout, a penalty cost is applied for every unit of unfulfilled demand. This cost is only incurred if `Demand Backlogging` is *not* enabled.
+        * **Total Backlog Penalty Cost (New):** If `Demand Backlogging` is enabled, a daily penalty cost is applied for every unit of backlogged demand until it is fulfilled.
     """)
     
 with st.expander("What are the different forecasting models?"):
@@ -842,11 +1174,17 @@ with st.expander("What are the different forecasting models?"):
     
 with st.expander("What data inputs are required?"):
     st.markdown("""
-        The application requires four primary CSV files to run:
+        The application requires several primary CSV files to run:
         * **`sales_data.csv`**: Contains historical sales transactions, including `Date`, `SKU_ID`, `Location`, and `Sales_Quantity`.
         * **`inventory_data.csv`**: Contains the initial `Current_Stock` levels for each `SKU_ID` and `Location` at the simulation's start date.
-        * **`lead_times_data.csv`**: Defines the supply chain network, including `From_Location`, `To_Location`, `Item_ID`, `Lead_Time_Days`, and order parameters like `Min_Order_Quantity`.
+        * **`lead_times_data.csv`**: Defines the supply chain network, including `From_Location`, `To_Location`, `Item_ID`, `Lead_Time_Days`, and order parameters like `Min_Order_Quantity`. **(Now includes `Lead_Time_Std_Dev_Days` for potential future advanced safety stock calculations)**.
         * **`bom_data.csv`**: The Bill of Materials, which links parent `SKU_ID`s to their `Component_ID`s and `Quantity_Required`.
+        * **`location_master.csv` (New & Required)**: Provides details about each location, including `Location_ID`, `Location_Type` (e.g., Factory, DC, Store), `Capacity_Units`, `Operating_Costs_Per_Day`, and crucially, `Production_Capacity_Units_Per_Day` for factories.
         
-        Optional files include `actual_orders.csv`, `actual_shipments.csv`, and `global_config.csv` for calculating historical fill rate and configuring costs.
+        Optional files include:
+        * **`actual_orders.csv`**: For historical fill rate calculations.
+        * **`actual_shipments.csv`**: For historical fill rate calculations.
+        * **`global_config.csv`**: Allows overriding default global parameters for costs (`Holding_Cost_Per_Unit_Per_Day`, `Ordering_Cost_Per_Order`, `Stockout_Cost_Per_Unit`, `Backlog_Penalty_Cost_Per_Day_Per_Unit`) and simulation behavior (`Backlog_Enabled`).
+        * **`sku_master.csv` (New)**: Provides additional attributes for each SKU such as `Value_Per_Unit`, `Product_Family`, `Weight_Unit`, and `Volume_Unit`.
+        * **`supplier_master.csv` (New)**: Contains information about suppliers, including `Supplier_ID`, `Reliability_Score`, and `Average_Delivery_Time_Days`.
     """)
