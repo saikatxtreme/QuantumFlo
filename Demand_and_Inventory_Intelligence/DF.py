@@ -13,6 +13,7 @@ from scipy.stats import norm
 import math
 import warnings
 warnings.filterwarnings('ignore') # Suppress warnings from statsmodels, etc.
+import graphviz # Added for network visualization
 
 # For Plotting
 import plotly.express as px
@@ -417,22 +418,17 @@ def calculate_reorder_point(historical_demand_df, lead_time_days, service_level,
     
     if safety_stock_method == "Statistical (Reorder Point)":
         std_demand = historical_demand_df['Demand_Quantity'].std()
-        
         avg_demand_during_lead_time = avg_demand * lead_time_days
         std_demand_during_lead_time = std_demand * np.sqrt(lead_time_days)
-        
         service_level_z_score = norm.ppf(service_level / 100)
-        
         safety_stock = service_level_z_score * std_demand_during_lead_time
         reorder_point = math.ceil(avg_demand_during_lead_time + safety_stock)
-    
     elif safety_stock_method == "King's Method":
         safety_stock = avg_demand * safety_stock_factor
         reorder_point = math.ceil((avg_demand * lead_time_days) + safety_stock)
-    
     else:
         reorder_point = math.ceil(avg_demand * lead_time_days)
-    
+        
     return reorder_point
 
 def run_multi_echelon_simulation(sales_df, inventory_df, component_inventory_df, network_df, skus_df, bom_df, reorder_df, holding_cost, ordering_cost, stockout_cost, enable_bom_check):
@@ -442,60 +438,61 @@ def run_multi_echelon_simulation(sales_df, inventory_df, component_inventory_df,
     """
     kpi_data = []
     
-    # Get all dates in the simulation period
-   	all_dates = np.sort(pd.to_datetime(sales_df['Date'].unique()))
-
+    # Corrected method for getting unique, sorted dates to avoid 'AttributeError'
+    sales_df['Date'] = pd.to_datetime(sales_df['Date'])
+    all_dates = sales_df['Date'].sort_values().unique()
     
     # Initialize a dictionary to hold daily inventory levels and orders
     current_inventory = {}
     current_component_inventory = {}
+    
+    total_holding_cost = 0
     total_ordering_cost = 0
+    total_stockout_cost = 0
     
     # Get all locations and SKUs
     all_locations = list(inventory_df['Location'].unique())
     all_skus = list(inventory_df['SKU_ID'].unique())
     all_components = list(component_inventory_df['Component_ID'].unique())
-
+    
     # Initialize inventory levels for the start of the simulation
-    for _, row in inventory_df.loc[inventory_df['Date'] == all_dates.min()].iterrows():
+    initial_inventory_df = inventory_df.loc[pd.to_datetime(inventory_df['Date']) == all_dates.min()]
+    for _, row in initial_inventory_df.iterrows():
         current_inventory[(row['SKU_ID'], row['Location'])] = row['On_Hand_Inventory']
     
     if enable_bom_check:
-        for _, row in component_inventory_df.loc[component_inventory_df['Date'] == all_dates.min()].iterrows():
+        initial_component_df = component_inventory_df.loc[pd.to_datetime(component_inventory_df['Date']) == all_dates.min()]
+        for _, row in initial_component_df.iterrows():
             current_component_inventory[row['Component_ID']] = row['On_Hand_Inventory']
-
+            
     # Identify the echelons
     echelons = network_df['Destination_Location_Type'].unique().tolist() + network_df['Source_Location_Type'].unique().tolist()
     echelons = sorted(list(set(echelons)), reverse=True) # Sort so we process from downstream to upstream
-    
+
     # Simulation state variables
     daily_stockout_tracker = {sku: {loc: 0 for loc in all_locations} for sku in all_skus}
     daily_orders_placed = {}
     open_orders = [] # list of tuples: (arrival_date, sku, quantity, location)
-
+    
     # Main simulation loop
     for date in all_dates:
+        
         # Process newly arrived orders
         arrived_orders = [o for o in open_orders if o[0] <= date]
         for arrival_date, sku, quantity, location in arrived_orders:
             current_inventory[(sku, location)] += quantity
-            
         open_orders = [o for o in open_orders if o[0] > date]
         
         # Propagate demand and place new orders from downstream to upstream
         for echelon in echelons:
-            
             locations_in_echelon = inventory_df[inventory_df['Location_Type'] == echelon]['Location'].unique()
             
             for location in locations_in_echelon:
-                
                 # Get the daily demand for this location
                 if echelon == 'Retail Store':
                     location_demand = sales_df.loc[
-                        (sales_df['Date'] == date) & 
-                        (sales_df['Location'] == location)
+                        (sales_df['Date'] == date) & (sales_df['Location'] == location)
                     ]
-                    
                     for _, row in location_demand.iterrows():
                         sku = row['SKU_ID']
                         demand_qty = row['Demand_Quantity']
@@ -506,7 +503,7 @@ def run_multi_echelon_simulation(sales_df, inventory_df, component_inventory_df,
                             current_inventory[(sku, location)] = 0
                         else:
                             current_inventory[(sku, location)] -= demand_qty
-
+                            
                         # Place new order if below reorder point
                         reorder_point_df = reorder_df.loc[(reorder_df['SKU_ID'] == sku) & (reorder_df['Location'] == location)]
                         if not reorder_point_df.empty:
@@ -519,672 +516,520 @@ def run_multi_echelon_simulation(sales_df, inventory_df, component_inventory_df,
                                 if not supplier_row.empty:
                                     supplier_location = supplier_row['Source_Location'].iloc[0]
                                     lead_time = supplier_row['Transit_Time_Days'].iloc[0]
-                                    
-                                    # Record the order placed for the supplier's demand
-                                    if (sku, supplier_location) not in daily_orders_placed:
-                                        daily_orders_placed[(sku, supplier_location)] = 0
-                                    daily_orders_placed[(sku, supplier_location)] += order_quantity
-                                    
+                                    arrival_date = date + timedelta(days=lead_time)
+                                    open_orders.append((arrival_date, sku, order_quantity, location))
                                     total_ordering_cost += ordering_cost
                                     
-                else: # Upstream echelons (DCs, Factories)
-                    # Demand for this echelon comes from orders placed by downstream locations
-                    daily_orders_for_location = daily_orders_placed.get((None, location), 0) # Placeholder
-                    
+                # For other echelons, demand comes from downstream locations
+                else:
+                    # Collect orders from downstream locations
+                    downstream_locations = network_df.loc[network_df['Source_Location'] == location]['Destination_Location'].unique()
                     for sku in all_skus:
-                         if (sku, location) in daily_orders_placed:
-                             order_qty = daily_orders_placed[(sku, location)]
-                             
-                             # Check for BOM components at factory level if enabled
-                             if enable_bom_check and echelon == 'Factory':
-                                 bom_for_sku = bom_df.loc[bom_df['SKU_ID'] == sku]
-                                 components_available = True
-                                 for _, bom_row in bom_for_sku.iterrows():
-                                     component_id = bom_row['Component_ID']
-                                     qty_per_sku = bom_row['Quantity_Per_SKU']
-                                     required_qty = order_qty * qty_per_sku
-                                     if current_component_inventory.get(component_id, 0) < required_qty:
-                                         components_available = False
-                                         break
-                                 
-                                 if not components_available:
-                                     # Not enough components, delay fulfillment
-                                     # For this simulation, we'll just log an error and skip
-                                     st.warning(f"BOM check failed: Not enough components for SKU {sku} at {location} on {date.date()}. Order fulfillment delayed.")
-                                     continue # Skip to the next order
-
-                                 # If components are available, consume them
-                                 for _, bom_row in bom_for_sku.iterrows():
-                                     component_id = bom_row['Component_ID']
-                                     qty_per_sku = bom_row['Quantity_Per_SKU']
-                                     current_component_inventory[component_id] -= (order_qty * qty_per_sku)
-                             
-                             # Fulfill the order
-                             if current_inventory.get((sku, location), 0) < order_qty:
-                                 # We can't fulfill the entire order, just what's available
-                                 fulfilled_qty = current_inventory.get((sku, location), 0)
-                                 current_inventory[(sku, location)] = 0
-                             else:
-                                 fulfilled_qty = order_qty
-                                 current_inventory[(sku, location)] -= order_qty
-
-                             # Determine the next supplier and lead time
-                             if echelon == 'Factory':
-                                 # Factories get components, they don't place orders for finished goods
-                                 # No order placement from Factory in this simulation
-                                 pass
-                             else: # DC
-                                 reorder_point_df = reorder_df.loc[(reorder_df['SKU_ID'] == sku) & (reorder_df['Location'] == location)]
-                                 if not reorder_point_df.empty:
-                                     reorder_point = reorder_point_df['Reorder_Point'].iloc[0]
-                                     if current_inventory.get((sku, location), 0) <= reorder_point:
-                                         order_quantity = reorder_point * 2
-                                         supplier_row = network_df.loc[network_df['Destination_Location'] == location]
-                                         if not supplier_row.empty:
-                                             supplier_location = supplier_row['Source_Location'].iloc[0]
-                                             lead_time = supplier_row['Transit_Time_Days'].iloc[0]
-                                             
-                                             if (sku, supplier_location) not in daily_orders_placed:
-                                                 daily_orders_placed[(sku, supplier_location)] = 0
-                                             daily_orders_placed[(sku, supplier_location)] += order_quantity
-                                             total_ordering_cost += ordering_cost
-                                             
-        # Calculate daily holding costs and record state for KPIs
-        for sku in all_skus:
-            for location in all_locations:
-                on_hand = current_inventory.get((sku, location), 0)
-                location_type = inventory_df.loc[inventory_df['Location'] == location, 'Location_Type'].iloc[0]
-                
-                kpi_data.append({
-                    'Date': date,
-                    'SKU_ID': sku,
-                    'Location': location,
-                    'Location_Type': location_type,
-                    'On_Hand_Inventory': on_hand,
-                    'Holding_Cost': on_hand * holding_cost,
-                    'Stockout_Quantity': daily_stockout_tracker.get(sku, {}).get(location, 0)
-                })
+                        # Check if a demand order was placed for this SKU from a downstream location
+                        demand_qty = sum(daily_orders_placed.get((sku, downstream_loc), 0) for downstream_loc in downstream_locations)
+                        
+                        if demand_qty > 0:
+                            # Fulfill demand
+                            if current_inventory.get((sku, location), 0) < demand_qty:
+                                daily_stockout_tracker[sku][location] += (demand_qty - current_inventory.get((sku, location), 0))
+                                current_inventory[(sku, location)] = 0
+                            else:
+                                current_inventory[(sku, location)] -= demand_qty
+                                
+                            # Place new order if below reorder point
+                            reorder_point_df = reorder_df.loc[(reorder_df['SKU_ID'] == sku) & (reorder_df['Location'] == location)]
+                            if not reorder_point_df.empty:
+                                reorder_point = reorder_point_df['Reorder_Point'].iloc[0]
+                                if current_inventory.get((sku, location), 0) <= reorder_point:
+                                    order_quantity = reorder_point * 2
+                                    
+                                    # Determine supplier and lead time
+                                    supplier_row = network_df.loc[network_df['Destination_Location'] == location]
+                                    if not supplier_row.empty:
+                                        supplier_location = supplier_row['Source_Location'].iloc[0]
+                                        lead_time = supplier_row['Transit_Time_Days'].iloc[0]
+                                        arrival_date = date + timedelta(days=lead_time)
+                                        open_orders.append((arrival_date, sku, order_quantity, location))
+                                        total_ordering_cost += ordering_cost
         
-        # Reset daily trackers
-        daily_stockout_tracker = {sku: {loc: 0 for loc in all_locations} for sku in all_skus}
-        daily_orders_placed = {}
+        # Calculate daily costs and KPIs
+        daily_inventory_level = sum(current_inventory.values())
+        daily_stockout_units = sum(sum(loc_stockouts.values()) for loc_stockouts in daily_stockout_tracker.values())
+        daily_holding_cost = daily_inventory_level * holding_cost
+        daily_stockout_cost = daily_stockout_units * stockout_cost
         
-    kpis_df = pd.DataFrame(kpi_data)
+        total_holding_cost += daily_holding_cost
+        total_stockout_cost += daily_stockout_cost
+        
+        kpi_data.append({
+            'Date': date,
+            'Total_Inventory_Level': daily_inventory_level,
+            'Total_Holding_Cost': total_holding_cost,
+            'Total_Ordering_Cost': total_ordering_cost,
+            'Total_Stockout_Cost': total_stockout_cost,
+            'Total_Cost': total_holding_cost + total_ordering_cost + total_stockout_cost
+        })
+        
+    return pd.DataFrame(kpi_data), daily_stockout_tracker
     
-    # Aggregate final KPIs
-    final_kpis = kpis_df.groupby(['SKU_ID', 'Location', 'Location_Type']).agg(
-        Total_Holding_Cost=('Holding_Cost', 'sum'),
-        Total_Stockout_Quantity=('Stockout_Quantity', 'sum'),
-        Total_Days=('Date', 'count')
-    ).reset_index()
     
-    final_kpis['Total_Stockout_Cost'] = final_kpis['Total_Stockout_Quantity'] * stockout_cost
-    final_kpis['Total_Ordering_Cost'] = total_ordering_cost
-    final_kpis['Stockout_Rate'] = (final_kpis['Total_Stockout_Quantity'] > 0).astype(int) / final_kpis['Total_Days'] * 100
-    
-    return final_kpis
+# --- Streamlit App ---
 
-
-# --- Streamlit App UI ---
 st.set_page_config(
-    page_title="Mobile & Wearables Demand and Inventory Intelligence",
+    page_title="Demand and Inventory Intelligence",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Initialize session state
+st.title("Demand and Inventory Intelligence App (v9)")
+st.caption("Advanced Multi-Echelon & BOM Integration")
+
+st.markdown("""
+This app simulates and optimizes inventory and demand planning using various models.
+""")
+
+# --- State Management ---
 if 'sales_df' not in st.session_state:
     st.session_state.sales_df = pd.DataFrame()
 if 'inventory_df' not in st.session_state:
     st.session_state.inventory_df = pd.DataFrame()
-if 'component_inventory_df' not in st.session_state:
-    st.session_state.component_inventory_df = pd.DataFrame()
-if 'skus_df' not in st.session_state:
-    st.session_state.skus_df = pd.DataFrame()
 if 'bom_df' not in st.session_state:
     st.session_state.bom_df = pd.DataFrame()
+if 'skus_df' not in st.session_state:
+    st.session_state.skus_df = pd.DataFrame()
 if 'network_df' not in st.session_state:
     st.session_state.network_df = pd.DataFrame()
+if 'component_inventory_df' not in st.session_state:
+    st.session_state.component_inventory_df = pd.DataFrame()
 if 'reorder_df' not in st.session_state:
     st.session_state.reorder_df = pd.DataFrame()
+if 'costs_df' not in st.session_state:
+    st.session_state.costs_df = pd.DataFrame()
 if 'kpis_df' not in st.session_state:
     st.session_state.kpis_df = pd.DataFrame()
 if 'forecast_df' not in st.session_state:
     st.session_state.forecast_df = pd.DataFrame()
-if 'costs_df' not in st.session_state:
-    st.session_state.costs_df = pd.DataFrame({
-        'Holding_Cost_Per_Unit_Per_Day': [DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY],
-        'Ordering_Cost_Per_Order': [DEFAULT_ORDERING_COST_PER_ORDER],
-        'Stockout_Cost_Per_Unit': [DEFAULT_STOCKOUT_COST_PER_UNIT],
-        'Service_Level': [DEFAULT_SERVICE_LEVEL],
-        'Safety_Stock_Method': ["Statistical (Reorder Point)"]
-    })
+if 'all_stockout_rates_df' not in st.session_state:
+    st.session_state.all_stockout_rates_df = pd.DataFrame()
+if 'reorder_points_df' not in st.session_state:
+    st.session_state.reorder_points_df = pd.DataFrame()
+if 'forecast_history' not in st.session_state:
+    st.session_state.forecast_history = {}
 
-# --- Main App Tabs ---
-tab1, tab2 = st.tabs(["Dashboard", "Documentation & FAQ"])
 
-with tab1:
-    # --- Main App Title & Description ---
-    st.title("Demand & Inventory Intelligence for Mobile & Wearables")
-    st.markdown("""
-    Welcome to the Demand and Inventory Intelligence platform. This tool helps you
-    forecast demand and optimize inventory at a granular level. Use the sidebar to
-    configure your data and run the analysis.
-    """)
+# --- Sidebar for Data Upload and Configuration ---
+st.sidebar.header("Data Configuration")
+selected_app_mode = st.sidebar.radio("Choose App Mode", ["Manual Data Upload", "Run with Sample Data"])
 
-    # --- Sidebar for user inputs ---
-    st.sidebar.header("Configuration")
-    st.sidebar.markdown("---")
+if selected_app_mode == "Manual Data Upload":
+    st.sidebar.subheader("Upload Your Data")
+    
+    sales_file = st.sidebar.file_uploader("Upload Sales Data (CSV)", type=["csv"], key="sales_file")
+    inventory_file = st.sidebar.file_uploader("Upload Inventory Data (CSV)", type=["csv"], key="inventory_file")
+    component_inventory_file = st.sidebar.file_uploader("Upload Component Inventory Data (CSV)", type=["csv"], key="component_inventory_file")
+    bom_file = st.sidebar.file_uploader("Upload Bill of Materials (BOM) (CSV)", type=["csv"], key="bom_file")
+    network_file = st.sidebar.file_uploader("Upload Supply Network (CSV)", type=["csv"], key="network_file")
+    sku_master_file = st.sidebar.file_uploader("Upload SKU Master Data (CSV)", type=["csv"], key="sku_master_file")
+    reorder_file = st.sidebar.file_uploader("Upload Reorder Policies (CSV)", type=["csv"], key="reorder_file")
+    costs_file = st.sidebar.file_uploader("Upload Global Cost Data (CSV)", type=["csv"], key="costs_file")
 
-    # Supply Chain Model Selection
-    with st.sidebar.expander("1. Supply Chain Model", expanded=True):
-        selected_sc_model = st.selectbox(
-            "Choose a Supply Chain Model",
-            options=["Traditional (Single-Echelon)", "Multi-Echelon"]
-        )
-        if selected_sc_model == "Multi-Echelon":
-             enable_bom_check = st.checkbox(
-                "Enable BOM (Bill of Materials) Check",
-                help="If checked, the factory simulation will check for component availability before fulfilling an order."
+    if st.sidebar.button("Load Uploaded Files"):
+        with st.sidebar.spinner("Loading files..."):
+            if sales_file:
+                st.session_state.sales_df = pd.read_csv(sales_file)
+            if inventory_file:
+                st.session_state.inventory_df = pd.read_csv(inventory_file)
+            if component_inventory_file:
+                st.session_state.component_inventory_df = pd.read_csv(component_inventory_file)
+            if bom_file:
+                st.session_state.bom_df = pd.read_csv(bom_file)
+            if network_file:
+                st.session_state.network_df = pd.read_csv(network_file)
+            if sku_master_file:
+                st.session_state.skus_df = pd.read_csv(sku_master_file)
+            if reorder_file:
+                st.session_state.reorder_df = pd.read_csv(reorder_file)
+            if costs_file:
+                st.session_state.costs_df = pd.read_csv(costs_file)
+        st.sidebar.success("Files loaded successfully!")
+
+    if st.sidebar.button("Download Sample Data Templates"):
+        st.sidebar.write("Downloading sample data templates...")
+        for data_type in ["Sales", "Inventory", "Component Inventory", "Network", "SKU Master", "BOM", "Global Costs"]:
+            template_df = create_template_df(data_type)
+            csv = template_df.to_csv(index=False).encode('utf-8')
+            st.sidebar.download_button(
+                label=f"Download {data_type} Template",
+                data=csv,
+                file_name=f"{data_type.lower().replace(' ', '_')}_template.csv",
+                mime="text/csv",
             )
-        else:
-            enable_bom_check = False
+        st.sidebar.success("All templates generated!")
 
 
-    # 2. Upload Data Section
-    with st.sidebar.expander("2. Upload Data", expanded=False):
-        st.markdown("**Load your data or use sample data below.**")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                label="Download Sales Template",
-                data=create_template_df("Sales").to_csv(index=False).encode('utf-8'),
-                file_name='sales_data_template.csv',
-                mime='text/csv'
-            )
-            st.download_button(
-                label="Download SKU Master Template",
-                data=create_template_df("SKU Master").to_csv(index=False).encode('utf-8'),
-                file_name='sku_master_template.csv',
-                mime='text/csv'
-            )
-            if selected_sc_model == "Multi-Echelon":
-                 st.download_button(
-                    label="Download Network Template",
-                    data=create_template_df("Network").to_csv(index=False).encode('utf-8'),
-                    file_name='network_template.csv',
-                    mime='text/csv'
-                )
-        with col2:
-            st.download_button(
-                label="Download BOM Template",
-                data=create_template_df("BOM").to_csv(index=False).encode('utf-8'),
-                file_name='bom_template.csv',
-                mime='text/csv'
-            )
-            st.download_button(
-                label="Download Costs Template",
-                data=create_template_df("Global Costs").to_csv(index=False).encode('utf-8'),
-                file_name='global_costs_template.csv',
-                mime='text/csv'
-            )
-            st.download_button(
-                label="Download Inventory Template",
-                data=create_template_df("Inventory").to_csv(index=False).encode('utf-8'),
-                file_name='inventory_template.csv',
-                mime='text/csv'
-            )
-            if selected_sc_model == "Multi-Echelon" and enable_bom_check:
-                 st.download_button(
-                    label="Download Component Inventory",
-                    data=create_template_df("Component Inventory").to_csv(index=False).encode('utf-8'),
-                    file_name='component_inventory_template.csv',
-                    mime='text/csv'
-                )
-            
-        st.markdown("---")
-        sales_file = st.file_uploader("Upload Daily Sales Data (CSV)", type=["csv"])
-        inventory_file = st.file_uploader("Upload Daily Inventory Data (CSV)", type=["csv"])
-        skus_file = st.file_uploader("Upload SKU Master Data (CSV)", type=["csv"])
-        bom_file = st.file_uploader("Upload BOM Data (CSV)", type=["csv"])
-        costs_file = st.file_uploader("Upload Global Config (CSV)", type=["csv"])
-        if selected_sc_model == "Multi-Echelon":
-            network_file = st.file_uploader("Upload Network Structure (CSV)", type=["csv"])
-        else:
-            network_file = None
-        if selected_sc_model == "Multi-Echelon" and enable_bom_check:
-             component_inventory_file = st.file_uploader("Upload Component Inventory (CSV)", type=["csv"])
-        else:
-            component_inventory_file = None
-
-        if st.button("Run with Sample Data"):
+elif selected_app_mode == "Run with Sample Data":
+    st.sidebar.subheader("Sample Data Generation")
+    
+    num_skus_input = st.sidebar.number_input("Number of SKUs", min_value=1, max_value=50, value=DEFAULT_NUM_SKUS)
+    start_date_input = st.sidebar.date_input("Start Date", value=DEFAULT_START_DATE)
+    end_date_input = st.sidebar.date_input("End Date", value=DEFAULT_END_DATE)
+    
+    if st.sidebar.button("Generate and Load Sample Data"):
+        with st.sidebar.spinner("Generating and loading sample data..."):
             generate_dummy_data()
+        st.experimental_rerun()
 
-    # 3. Model Selection and Parameters section
-    with st.sidebar.expander("3. Model & Forecast Settings", expanded=False):
-        model_options = ["XGBoost", "Random Forest", "Moving Average", "Moving Median", "Auto Select"]
-        selected_model = st.selectbox(
-            "Select Forecasting Model",
-            options=model_options,
-            help="Choose a model or let the app automatically select the best one."
+
+# --- Display Uploaded Data ---
+if not st.session_state.sales_df.empty:
+    st.subheader("Uploaded Data Preview")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        if not st.session_state.sales_df.empty:
+            st.write("**Sales Data**")
+            st.dataframe(st.session_state.sales_df.head(), use_container_width=True)
+    with col2:
+        if not st.session_state.inventory_df.empty:
+            st.write("**Inventory Data**")
+            st.dataframe(st.session_state.inventory_df.head(), use_container_width=True)
+    with col3:
+        if not st.session_state.bom_df.empty:
+            st.write("**BOM Data**")
+            st.dataframe(st.session_state.bom_df.head(), use_container_width=True)
+    with col4:
+        if not st.session_state.network_df.empty:
+            st.write("**Network Data**")
+            st.dataframe(st.session_state.network_df.head(), use_container_width=True)
+
+    if not st.session_state.reorder_df.empty:
+        st.write("Reorder Policies:")
+        st.dataframe(st.session_state.reorder_df.head(), use_container_width=True)
+
+# --- Forecasting Section ---
+st.header("Forecasting")
+if not st.session_state.sales_df.empty:
+    
+    forecast_col1, forecast_col2 = st.columns(2)
+    with forecast_col1:
+        all_skus_for_forecast = st.session_state.sales_df['SKU_ID'].unique()
+        selected_sku_for_forecast = st.selectbox(
+            "Select SKU for Forecasting",
+            all_skus_for_forecast,
+            key="selected_sku_forecast"
         )
-        
-        forecast_periods = st.number_input(
+    with forecast_col2:
+        forecast_horizon = st.number_input(
             "Forecast Horizon (Days)",
-            min_value=7,
-            max_value=365,
-            value=30,
-            help="Number of days to forecast into the future."
+            min_value=1,
+            value=365
         )
-        
-        model_params = {}
-        if selected_model in ["XGBoost", "Random Forest"]:
-            st.subheader("Model Hyperparameters")
-            n_estimators = st.number_input("Number of Estimators", min_value=50, max_value=500, value=100, step=10)
-            max_depth = st.number_input("Max Depth", min_value=2, max_value=20, value=5, step=1)
+    
+    st.subheader("Model Selection")
+    
+    # Model configuration
+    model_col1, model_col2 = st.columns(2)
+    
+    with model_col1:
+        forecast_model = st.selectbox(
+            "Choose Forecasting Model",
+            ["Auto-Select", "XGBoost", "Random Forest", "Moving Average", "Moving Median"],
+            key="selected_model_forecast"
+        )
+    
+    with model_col2:
+        if forecast_model in ["XGBoost", "Random Forest"]:
+            n_estimators = st.number_input("Number of Estimators", min_value=10, value=100)
+            max_depth = st.number_input("Max Depth", min_value=1, value=5)
             model_params = {'n_estimators': n_estimators, 'max_depth': max_depth}
-        
-        if selected_model in ["Moving Average", "Moving Median"]:
-            st.subheader("Model Parameters")
-            window_size = st.number_input("Window Size (Days)", min_value=2, max_value=90, value=7, step=1)
+        elif forecast_model in ["Moving Average", "Moving Median"]:
+            window_size = st.number_input("Window Size", min_value=1, value=7)
             model_params = {'window_size': window_size}
-
-    # 4. Inventory & Cost Parameters section
-    with st.sidebar.expander("4. Inventory & Cost Parameters", expanded=False):
-        st.subheader("Cost Settings")
-        holding_cost = st.number_input(
-            "Holding Cost per Unit per Day ($)",
-            min_value=0.01,
-            value=DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY,
-            step=0.01
-        )
-        ordering_cost = st.number_input(
-            "Ordering Cost per Order ($)",
-            min_value=1.00,
-            value=DEFAULT_ORDERING_COST_PER_ORDER,
-            step=1.00
-        )
-        stockout_cost = st.number_input(
-            "Stockout Cost per Unit ($)",
-            min_value=1.00,
-            value=DEFAULT_STOCKOUT_COST_PER_UNIT,
-            step=1.00
-        )
-        
-        st.subheader("Safety Stock & Service Level")
-        service_level = st.number_input(
-            "Service Level (%)",
-            min_value=50,
-            max_value=99,
-            value=DEFAULT_SERVICE_LEVEL,
-            step=1,
-            help="Desired service level (e.g., 95% means 95% of demand will be met from stock)."
-        )
-        safety_stock_method = st.selectbox(
-            "Safety Stock Method",
-            options=["Statistical (Reorder Point)", "King's Method"],
-            help="The method used to calculate safety stock."
-        )
-
-        st.session_state.costs_df = pd.DataFrame({
-            'Holding_Cost_Per_Unit_Per_Day': [holding_cost],
-            'Ordering_Cost_Per_Order': [ordering_cost],
-            'Stockout_Cost_Per_Unit': [stockout_cost],
-            'Service_Level': [service_level],
-            'Safety_Stock_Method': [safety_stock_method]
-        })
-        
-    # Data filtering and analysis section
-    if not st.session_state.sales_df.empty:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Filter Data for Analysis")
-        selected_skus = st.sidebar.multiselect(
-            "Select SKUs",
-            options=st.session_state.sales_df['SKU_ID'].unique(),
-            default=st.session_state.sales_df['SKU_ID'].unique()
-        )
-        selected_channels = st.sidebar.multiselect(
-            "Select Sales Channels",
-            options=st.session_state.sales_df['Sales_Channel'].unique(),
-            default=st.session_state.sales_df['Sales_Channel'].unique()
-        )
-        selected_regions = st.sidebar.multiselect(
-            "Select Regions",
-            options=st.session_state.sales_df['Region'].unique(),
-            default=st.session_state.sales_df['Region'].unique()
-        )
-        selected_locations = st.sidebar.multiselect(
-            "Select Locations",
-            options=st.session_state.sales_df['Location'].unique(),
-            default=st.session_state.sales_df['Location'].unique()
-        )
-        
-    st.sidebar.markdown("---")
-    if st.sidebar.button("Run Analysis", use_container_width=True, type="primary"):
-        if st.session_state.sales_df.empty or st.session_state.skus_df.empty or st.session_state.inventory_df.empty:
-            st.error("Please upload all required data files or use sample data before running the analysis.")
-        elif selected_sc_model == "Multi-Echelon" and st.session_state.network_df.empty:
-            st.error("Please upload the network structure file for multi-echelon analysis.")
-        elif selected_sc_model == "Multi-Echelon" and enable_bom_check and st.session_state.component_inventory_df.empty:
-             st.error("Please upload the component inventory file to enable the BOM check.")
         else:
-            with st.spinner("Running analysis..."):
-                filtered_sales_df = st.session_state.sales_df[
-                    (st.session_state.sales_df['SKU_ID'].isin(selected_skus)) &
-                    (st.session_state.sales_df['Sales_Channel'].isin(selected_channels)) &
-                    (st.session_state.sales_df['Region'].isin(selected_regions)) &
-                    (st.session_state.sales_df['Location'].isin(selected_locations))
-                ]
+            model_params = {}
+    
+    if st.button("Run Forecasting"):
+        with st.spinner(f"Running {forecast_model} forecast for {selected_sku_for_forecast}..."):
+            sku_sales_df = st.session_state.sales_df[st.session_state.sales_df['SKU_ID'] == selected_sku_for_forecast].copy()
+            sku_sales_df['Date'] = pd.to_datetime(sku_sales_df['Date'])
+            
+            # Aggregate to daily demand
+            daily_demand = sku_sales_df.groupby('Date').agg(Demand_Quantity=('Demand_Quantity', 'sum')).reset_index()
+            
+            # Join with other data for features
+            # NOTE: For a real app, this would require careful feature engineering.
+            # We'll use a simplified merge here.
+            
+            # Placeholder for merging, assuming dummy data has daily entries for these features
+            # A more robust solution would require resampling and forward-filling
+            
+            # Create a simple dataframe for forecasting
+            forecast_df_base = daily_demand.rename(columns={'Date': 'ds', 'Demand_Quantity': 'y'})
+            
+            if "Promotion_Discount_Rate" in sku_sales_df.columns:
+                promo_df = sku_sales_df[['Date', 'Promotion_Discount_Rate']].drop_duplicates().set_index('Date').resample('D').mean().fillna(0).reset_index()
+                forecast_df_base = pd.merge(forecast_df_base, promo_df, left_on='ds', right_on='Date', how='left').drop(columns='Date')
+            else:
+                forecast_df_base['Promotion_Discount_Rate'] = 0.0
+
+            if "Online_Ad_Spend" in sku_sales_df.columns:
+                ad_spend_df = sku_sales_df[['Date', 'Online_Ad_Spend']].drop_duplicates().set_index('Date').resample('D').sum().fillna(0).reset_index()
+                forecast_df_base = pd.merge(forecast_df_base, ad_spend_df, left_on='ds', right_on='Date', how='left').drop(columns='Date')
+            else:
+                forecast_df_base['Online_Ad_Spend'] = 0.0
+
+            if "Competitor_Price" in sku_sales_df.columns:
+                comp_price_df = sku_sales_df[['Date', 'Competitor_Price']].drop_duplicates().set_index('Date').resample('D').mean().fillna(method='ffill').reset_index()
+                forecast_df_base = pd.merge(forecast_df_base, comp_price_df, left_on='ds', right_on='Date', how='left').drop(columns='Date')
+            else:
+                forecast_df_base['Competitor_Price'] = 0.0
+
+            forecast_df_base = forecast_df_base.fillna(0)
+
+            
+            # Handle Auto-Select
+            if forecast_model == "Auto-Select":
+                models_to_test = ["XGBoost", "Random Forest", "Moving Average", "Moving Median"]
+                best_model_name = auto_select_best_model(forecast_df_base, models_to_test)
+                # Re-run the best model to get the full forecast
+                if best_model_name == "Moving Average" or best_model_name == "Moving Median":
+                    model_params = {'window_size': 7}
+                else:
+                    model_params = {'n_estimators': 100, 'max_depth': 3}
+                forecast_results, mae, rmse = run_forecasting(forecast_df_base, best_model_name, forecast_horizon, model_params)
+            else:
+                forecast_results, mae, rmse = run_forecasting(forecast_df_base, forecast_model, forecast_horizon, model_params)
+            
+            future_dates = pd.date_range(start=forecast_df_base['ds'].max() + timedelta(days=1), periods=forecast_horizon)
+            
+            forecast_df = pd.DataFrame({
+                'Date': future_dates,
+                'Forecasted_Demand': forecast_results
+            })
+            
+            st.session_state.forecast_df = forecast_df
+            st.session_state.forecast_history[selected_sku_for_forecast] = forecast_df
+            
+            # Display metrics
+            if mae is not None and rmse is not None:
+                st.markdown(f"**Forecast Metrics:**")
+                st.markdown(f"**Mean Absolute Error (MAE):** `{mae:.2f}`")
+                st.markdown(f"**Root Mean Squared Error (RMSE):** `{rmse:.2f}`")
+
+            st.success("Forecasting complete!")
+
+# --- Forecasting Results Visualization ---
+if not st.session_state.forecast_df.empty:
+    st.subheader("Forecast Results")
+    
+    # Plot historical demand and forecast
+    historical_demand_plot = st.session_state.sales_df.groupby(['Date', 'SKU_ID'])['Demand_Quantity'].sum().reset_index()
+    historical_demand_plot['Date'] = pd.to_datetime(historical_demand_plot['Date'])
+    historical_demand_plot = historical_demand_plot[historical_demand_plot['SKU_ID'] == st.session_state.selected_sku_forecast]
+    
+    # Combine historical and forecast data for plotting
+    historical_demand_plot = historical_demand_plot.rename(columns={'Demand_Quantity': 'Demand'})
+    forecast_plot = st.session_state.forecast_df.rename(columns={'Forecasted_Demand': 'Demand'})
+    
+    historical_demand_plot['Type'] = 'Historical'
+    forecast_plot['Type'] = 'Forecast'
+
+    # Filter out dates where forecast overlaps with historical data
+    max_historical_date = historical_demand_plot['Date'].max()
+    forecast_plot = forecast_plot[forecast_plot['Date'] > max_historical_date]
+    
+    combined_df = pd.concat([historical_demand_plot, forecast_plot])
+    
+    fig = px.line(
+        combined_df,
+        x='Date',
+        y='Demand',
+        color='Type',
+        title=f"Historical Demand vs. Forecast for {st.session_state.selected_sku_forecast}",
+        labels={'Demand': 'Demand (Units)'},
+        color_discrete_map={'Historical': 'green', 'Forecast': 'red'}
+    )
+    
+    fig.update_layout(hovermode="x unified")
+    st.plotly_chart(fig, use_container_width=True)
+
+# --- Simulation and Analysis ---
+st.header("Simulation and Analysis")
+
+if not st.session_state.sales_df.empty:
+    
+    # Sidebar for Simulation Parameters
+    with st.expander("Simulation Parameters"):
+        st.subheader("Simulation Options")
+        
+        selected_sc_model = st.radio(
+            "Choose Simulation Model",
+            ["Multi-Echelon", "Reorder Point"],
+            help="""
+            - **Multi-Echelon**: A simulation that considers the entire supply chain network and BOM,
+              calculating KPIs based on inventory movements and reorder policies.
+            - **Reorder Point**: A simple model that calculates stockout rates based on a single
+              reorder point and lead time.
+            """
+        )
+        
+        enable_bom_check = st.checkbox("Enable Bill of Materials (BOM) Production Check", value=True)
+        
+        st.subheader("Reorder Point Calculation")
+        
+        safety_stock_method = st.selectbox(
+            "Safety Stock Calculation Method",
+            ["Statistical (Reorder Point)", "King's Method", "No Safety Stock"]
+        )
+        
+        safety_stock_factor = None
+        if safety_stock_method == "King's Method":
+            safety_stock_factor = st.slider("Safety Stock Factor", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+
+    run_simulation_button = st.button("Run Simulation and Analysis")
+
+    if run_simulation_button:
+        with st.spinner("Running simulation and analysis..."):
+            
+            # Validate required dataframes
+            if selected_sc_model == "Multi-Echelon" and (st.session_state.network_df.empty or st.session_state.reorder_df.empty or st.session_state.bom_df.empty or st.session_state.inventory_df.empty):
+                st.error("Please upload all required dataframes for Multi-Echelon model: Sales, Inventory, BOM, Network, and Reorder Policies.")
+                st.stop()
+            
+            # Default to dummy costs if not provided
+            if st.session_state.costs_df.empty:
+                costs_df = create_template_df("Global Costs")
+            else:
+                costs_df = st.session_state.costs_df
+            
+            holding_cost = costs_df.loc[0, 'Holding_Cost_Per_Unit_Per_Day'] if not costs_df.empty else DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY
+            ordering_cost = costs_df.loc[0, 'Ordering_Cost_Per_Order'] if not costs_df.empty else DEFAULT_ORDERING_COST_PER_ORDER
+            stockout_cost = costs_df.loc[0, 'Stockout_Cost_Per_Unit'] if not costs_df.empty else DEFAULT_STOCKOUT_COST_PER_UNIT
+            
+            # Generate Reorder Points if not provided
+            if st.session_state.reorder_df.empty:
+                st.info("Generating Reorder Points based on your data and selected method...")
                 
-                if filtered_sales_df.empty:
-                    st.warning("No data found for the selected filters. Please adjust your selections.")
-                    st.stop()
+                reorder_points_list = []
+                unique_sku_locations = st.session_state.sales_df[['SKU_ID', 'Location']].drop_duplicates().to_records(index=False)
                 
-                st.subheader("Demand Forecasting Results")
-                st.session_state.forecast_df = pd.DataFrame()
-
-                # Forecasting only happens at the lowest echelon (where end-customer demand exists)
-                unique_forecast_combos = filtered_sales_df[['SKU_ID', 'Sales_Channel', 'Region', 'Location']].drop_duplicates()
-                
-                for _, combo in unique_forecast_combos.iterrows():
-                    sku = combo['SKU_ID']
-                    channel = combo['Sales_Channel']
-                    region = combo['Region']
-                    location = combo['Location']
-
-                    sku_combo_df = filtered_sales_df[
-                        (filtered_sales_df['SKU_ID'] == sku) &
-                        (filtered_sales_df['Sales_Channel'] == channel) &
-                        (filtered_sales_df['Region'] == region) &
-                        (filtered_sales_df['Location'] == location)
-                    ]
+                for sku, location in unique_sku_locations:
+                    historical_demand = st.session_state.sales_df[
+                        (st.session_state.sales_df['SKU_ID'] == sku) &
+                        (st.session_state.sales_df['Location'] == location)
+                    ].copy()
                     
-                    if sku_combo_df.empty:
-                        continue
+                    historical_demand['Date'] = pd.to_datetime(historical_demand['Date'])
                     
-                    current_model = selected_model
-                    if selected_model == "Auto Select":
-                        current_model = auto_select_best_model(
-                            sku_combo_df.rename(columns={'Date': 'ds', 'Demand_Quantity': 'y'}),
-                            ["XGBoost", "Random Forest", "Moving Average", "Moving Median"]
-                        )
-                    
-                    if current_model in ['XGBoost', 'Random Forest']:
-                        params = {'n_estimators': 100, 'max_depth': 3}
-                    elif current_model in ['Moving Average', 'Moving Median']:
-                        params = {'window_size': 7}
-                    else:
-                        params = model_params
-
-                    forecast, mae, rmse = run_forecasting(sku_combo_df, current_model, forecast_periods, params)
-                    
-                    if forecast:
-                        future_dates = pd.date_range(start=sku_combo_df['Date'].max() + timedelta(days=1), periods=forecast_periods)
-                        forecast_results = pd.DataFrame({
-                            'Date': future_dates,
-                            'SKU_ID': sku,
-                            'Sales_Channel': channel,
-                            'Region': region,
-                            'Location': location,
-                            'Forecasted_Demand': forecast
-                        })
-                        st.session_state.forecast_df = pd.concat([st.session_state.forecast_df, forecast_results])
-
-                if not st.session_state.forecast_df.empty:
-                    st.success("Demand forecasting complete!")
-                    st.subheader("Demand Forecast Visualization")
-                    
-                    unique_forecast_combos = st.session_state.forecast_df.apply(
-                        lambda row: f"{row['SKU_ID']} | {row['Sales_Channel']} | {row['Location']}", axis=1
-                    ).unique()
-
-                    selected_combo_plot = st.selectbox(
-                        "Select a combination to visualize the forecast",
-                        unique_forecast_combos
-                    )
-                    
-                    sku_plot, channel_plot, location_plot = selected_combo_plot.split(' | ')
-                    
-                    sku_historical = filtered_sales_df[
-                        (filtered_sales_df['SKU_ID'] == sku_plot) &
-                        (filtered_sales_df['Sales_Channel'] == channel_plot) &
-                        (filtered_sales_df['Location'] == location_plot)
-                    ]
-                    
-                    sku_forecast = st.session_state.forecast_df[
-                        (st.session_state.forecast_df['SKU_ID'] == sku_plot) &
-                        (st.session_state.forecast_df['Sales_Channel'] == channel_plot) &
-                        (st.session_state.forecast_df['Location'] == location_plot)
-                    ]
-
-                    if not sku_historical.empty and not sku_forecast.empty:
-                        combined_df = pd.concat([
-                            sku_historical.rename(columns={'Demand_Quantity': 'Demand_Value'}),
-                            sku_forecast.rename(columns={'Forecasted_Demand': 'Demand_Value'})
-                        ], ignore_index=True)
-
-                        fig = px.line(
-                            combined_df, 
-                            x='Date', 
-                            y='Demand_Value', 
-                            title=f"Demand Forecast for {selected_combo_plot}"
-                        )
-                        
-                        fig.add_vrect(
-                            x0=sku_historical['Date'].max(), x1=sku_forecast['Date'].max(),
-                            fillcolor="LightSalmon", opacity=0.5,
-                            layer="below", line_width=0,
-                        )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No forecast data available for this combination.")
-                        
-                st.subheader("Inventory Optimization")
-                
-                reorder_points = []
-                unique_analysis_combos = st.session_state.inventory_df[['SKU_ID', 'Location', 'Location_Type']].drop_duplicates()
-                
-                for _, combo in unique_analysis_combos.iterrows():
-                    sku = combo['SKU_ID']
-                    location = combo['Location']
-                    location_type = combo['Location_Type']
-                    
-                    # Calculate historical demand for reorder point calculation
-                    if selected_sc_model == "Traditional (Single-Echelon)" or location_type == 'Retail Store':
-                         historical_demand_df = filtered_sales_df[
-                             (filtered_sales_df['SKU_ID'] == sku) &
-                             (filtered_sales_df['Location'] == location)
-                         ]
-                         lead_time_days = st.session_state.skus_df[st.session_state.skus_df['SKU_ID'] == sku]['Lead_Time_Days'].iloc[0]
-                    else: # Multi-Echelon for upstream nodes
-                        # Upstream demand comes from downstream locations
-                        downstream_locations = st.session_state.network_df[
-                            (st.session_state.network_df['Source_Location'] == location)
-                        ]['Destination_Location'].unique()
-                        
-                        if not downstream_locations.any():
-                             continue
-                             
-                        historical_demand_df = filtered_sales_df[
-                            (filtered_sales_df['SKU_ID'] == sku) &
-                            (filtered_sales_df['Location'].isin(downstream_locations))
-                        ]
-                        historical_demand_df = historical_demand_df.groupby('Date')['Demand_Quantity'].sum().reset_index()
-
-                        if location_type == 'Factory':
-                            lead_time_days = st.session_state.skus_df[st.session_state.skus_df['SKU_ID'] == sku]['Lead_Time_Days'].iloc[0]
-                        else: # Distribution Center
-                            lead_time_days = st.session_state.network_df[
-                                (st.session_state.network_df['Destination_Location'] == location)
-                            ]['Transit_Time_Days'].iloc[0]
-
-                    if historical_demand_df.empty:
-                        continue
-                        
-                    sku_info = st.session_state.skus_df[st.session_state.skus_df['SKU_ID'] == sku].iloc[0]
-                    safety_stock_factor = sku_info['Safety_Stock_Factor']
+                    # Assume a default lead time if not available
+                    lead_time = st.session_state.skus_df.loc[st.session_state.skus_df['SKU_ID'] == sku, 'Lead_Time_Days'].iloc[0] if not st.session_state.skus_df.empty else 14
                     
                     reorder_point = calculate_reorder_point(
-                        historical_demand_df, 
-                        lead_time_days, 
-                        service_level, 
-                        safety_stock_method,
-                        safety_stock_factor
+                        historical_demand, 
+                        lead_time_days=lead_time,
+                        service_level=DEFAULT_SERVICE_LEVEL,
+                        safety_stock_method=safety_stock_method,
+                        safety_stock_factor=safety_stock_factor
                     )
                     
-                    reorder_points.append({
-                        'SKU_ID': sku, 
+                    # Simple Order Quantity heuristic
+                    order_quantity = math.ceil(historical_demand['Demand_Quantity'].mean() * 30)
+                    
+                    reorder_points_list.append({
+                        'SKU_ID': sku,
                         'Location': location,
-                        'Location_Type': location_type,
-                        'Reorder_Point': reorder_point
+                        'Reorder_Point': reorder_point,
+                        'Order_Quantity': order_quantity
                     })
                 
-                st.session_state.reorder_df = pd.DataFrame(reorder_points)
-                st.write("Calculated Reorder Points:")
-                st.dataframe(st.session_state.reorder_df)
-                
-                st.subheader("Inventory KPIs")
-                holding_cost = st.session_state.costs_df['Holding_Cost_Per_Unit_Per_Day'].iloc[0]
-                ordering_cost = st.session_state.costs_df['Ordering_Cost_Per_Order'].iloc[0]
-                stockout_cost = st.session_state.costs_df['Stockout_Cost_Per_Unit'].iloc[0]
-                
-                if selected_sc_model == "Multi-Echelon":
-                    st.session_state.kpis_df = run_multi_echelon_simulation(
-                        filtered_sales_df, st.session_state.inventory_df, st.session_state.component_inventory_df,
-                        st.session_state.network_df, st.session_state.skus_df, st.session_state.bom_df, 
-                        st.session_state.reorder_df, holding_cost, ordering_cost, stockout_cost, enable_bom_check
-                    )
-                    st.dataframe(st.session_state.kpis_df)
-                else:
-                    # Logic for traditional model goes here (re-using old simulation or creating a new one)
-                    # For simplicity, we'll indicate this part needs implementation for the full simulation
-                    st.info("The Traditional model is currently a simplified calculation. The Multi-Echelon model runs a full simulation.")
-                    
-                st.success("Analysis complete!")
+                st.session_state.reorder_df = pd.DataFrame(reorder_points_list)
+                st.write("Generated Reorder Policies:")
+                st.dataframe(st.session_state.reorder_df, use_container_width=True)
 
-with tab2:
-    st.title("Documentation & FAQ")
-    st.markdown("""
-    ### 📝 Application Overview
-    This application is a comprehensive tool for demand forecasting and inventory optimization. It is designed specifically for companies in the mobile and wearables industry but can be adapted for any business.
+            # Run the simulation
+            if selected_sc_model == "Multi-Echelon":
+                st.session_state.kpis_df, daily_stockout_tracker = run_multi_echelon_simulation(
+                    st.session_state.sales_df, 
+                    st.session_state.inventory_df, 
+                    st.session_state.component_inventory_df,
+                    st.session_state.network_df,
+                    st.session_state.skus_df,
+                    st.session_state.bom_df,
+                    st.session_state.reorder_df,
+                    holding_cost,
+                    ordering_cost,
+                    stockout_cost,
+                    enable_bom_check
+                )
+            
+                st.success("Simulation and analysis complete!")
+            else:
+                st.warning("Reorder Point simulation model is not yet implemented. Please select Multi-Echelon.")
+                st.stop()
 
-    **Key Features:**
-    * **Advanced Multi-Echelon Simulation:** A granular, day-by-day simulation models the flow of orders and inventory across a multi-tiered supply chain network.
-    * **Bill of Materials (BOM) Integration:** The factory-level simulation can now check for component availability before producing finished goods, introducing a critical real-world constraint.
-    * **Granular Demand Forecasting:** Forecast demand at the SKU, Sales Channel, and Location level.
-    * **Comprehensive Cost Analysis:** The simulation reports on total holding, ordering, and stockout costs to provide a complete picture of supply chain performance.
-    * **Reorder Point Calculation:** Automatically calculate optimal reorder points using different methods for each SKU-Location combination.
-    * **Data Management:** Easily upload your own data or use pre-populated sample data.
 
-    ---
-
-    ### 📖 Getting Started
-    To use the application, follow these simple steps:
-
-    1.  **Choose a Supply Chain Model:** In the sidebar, select either "Traditional (Single-Echelon)" or "Multi-Echelon." If you choose the multi-echelon model, you can optionally check the "Enable BOM (Bill of Materials) Check" to add a component availability constraint.
-    2.  **Download Templates:** Use the "Download Template" buttons in the sidebar to get the required CSV file formats for your data. For the advanced models, templates for `network_structure.csv` and `component_inventory.csv` are also provided.
-    3.  **Prepare Your Data:** Fill in your business data into the downloaded templates. Be sure to include data for `Sales Channel`, `Region`, `Location`, and `Location_Type` as needed.
-    4.  **Upload Data:** Use the "Upload Data" section in the sidebar to load your prepared CSV files. Alternatively, click "Run with Sample Data" to pre-populate the app with dummy data.
-    5.  **Filter Data:** Use the filters in the sidebar to select the specific SKUs, channels, regions, and locations you want to analyze.
-    6.  **Configure Settings:** Adjust the model and forecast settings, as well as inventory and cost parameters, using the sidebar.
-    7.  **Run Analysis:** Click the "Run Analysis" button to execute the demand forecasting and inventory simulation for your selected filters. The results will appear on the dashboard.
-
-    ---
-    ### ⚙️ Deep Dive: Data and Calculations
-
-    This section provides a detailed look at the data inputs, configurable parameters, and the formulas used in the core calculations.
-
-    #### Supply Chain Models
-    * **Traditional (Single-Echelon):** This model assumes that each location (e.g., a warehouse or store) operates independently. It places orders directly with an external supplier, and its inventory is only used to fulfill local demand.
-    * **Multi-Echelon:** This model simulates a network of locations with dependencies. The simulation runs chronologically, day by day. Demand from a downstream location (e.g., a retail store's sales) triggers an order with its upstream supplier (e.g., a distribution center). This process cascades up the supply chain, taking into account lead times and inventory at each level.
-
-    #### Data Input Tables
-    The application requires up to seven primary CSV data tables, each with a specific structure:
-
-    1.  **Sales Data (`sales.csv`)**: Contains historical daily sales.
-        * `Date`: The date of the transaction.
-        * `SKU_ID`: The unique identifier for the product.
-        * `Sales_Channel`: The channel through which the sale was made.
-        * `Region`: The geographical region of the sale.
-        * `Location`: The specific location (e.g., store, DC) of the sale.
-        * `Demand_Quantity`: The number of units sold.
-        * `Promotion_Discount_Rate`: The discount percentage applied during a promotion.
-        * `Online_Ad_Spend`: The amount spent on online advertising for that day.
-        * `Competitor_Price`: The price of a competitor's product.
-
-    2.  **Inventory Data (`inventory.csv`)**: Contains historical daily on-hand inventory levels for finished goods.
-        * `Date`: The date of the inventory record.
-        * `SKU_ID`: The unique identifier for the product.
-        * `Location`: The specific location.
-        * `Location_Type`: The type of location (e.g., "Retail Store", "Distribution Center", "Factory").
-        * `On_Hand_Inventory`: The number of units in stock.
-
-    3.  **Component Inventory (`component_inventory.csv`)** - *Required for BOM Check*
-        * `Date`: The date of the inventory record.
-        * `Component_ID`: The unique identifier for a raw material or component.
-        * `Location`: The location where the component is stored (e.g., a factory).
-        * `Location_Type`: The type of location (e.g., "Factory").
-        * `On_Hand_Inventory`: The number of units in stock.
-
-    4.  **Network Structure (`network_structure.csv`)** - *Required for Multi-Echelon Model Only*
-        * `Source_Location`: The upstream location (supplier).
-        * `Source_Location_Type`: The type of the source location.
-        * `Destination_Location`: The downstream location (customer).
-        * `Destination_Location_Type`: The type of the destination location.
-        * `Transit_Time_Days`: The time it takes to move goods between locations.
-
-    5.  **SKU Master Data (`sku_master.csv`)**: Contains static information about each product.
-        * `SKU_ID`: The unique identifier for the product.
-        * `Retail_Price`: The selling price of the product.
-        * `Shelf_Life_Days`: The number of days the product is viable.
-        * `Lead_Time_Days`: The time (in days) it takes to receive an order from an external supplier (only for the highest echelon, like a factory).
-        * `Safety_Stock_Factor`: A multiplier used in the "King's Method" for calculating safety stock.
-
-    6.  **Bill of Materials (BOM) Data (`bom.csv`)**: Details the components of each SKU.
-        * `SKU_ID`: The unique identifier for the finished product.
-        * `Component_ID`: The unique identifier for a raw material or component.
-        * `Quantity_Per_SKU`: The number of units of the component needed to build one SKU.
-        * `Cost_Per_Unit`: The cost of one unit of the component.
-
-    7.  **Global Costs (`global_costs.csv`)**: Sets the cost parameters for inventory optimization.
-        * `Holding_Cost_Per_Unit_Per_Day`: The cost to store one unit of product for one day.
-        * `Ordering_Cost_Per_Order`: The fixed cost of placing a single order, regardless of quantity.
-        * `Stockout_Cost_Per_Unit`: The penalty cost incurred for each unit of lost demand (e.g., lost profit).
-
-    #### Key Input Parameters
-    These are the values you can adjust in the sidebar to control the analysis.
-
-    * `Forecast Horizon (Days)`: The number of days into the future for which the demand forecast will be generated.
-    * `Service Level (%)`: The probability of not having a stockout. A higher service level requires more safety stock.
-    * `Holding Cost per Unit per Day ($)`: This is the cost to hold inventory. A higher cost will lead to lower inventory levels.
-    * `Ordering Cost per Order ($)`: The fixed cost incurred each time an order is placed.
-    * `Stockout Cost per Unit ($)`: This is the cost of not being able to meet demand. A higher cost will increase safety stock to avoid stockouts.
-    * `Enable BOM Check`: A new setting for the multi-echelon model that adds a dependency on component inventory at the factory level.
-    * **Data Filters**: The `multiselect` boxes allow you to filter the analysis by `SKU`, `Sales Channel`, `Region`, and `Location` for a more targeted view.
-
-    #### Core Calculations
-
-    **1. Reorder Point Calculation**
-    The reorder point is the minimum inventory level that triggers a new order. It is calculated for each unique `SKU-Location` combination based on the chosen method.
-
-    * **Traditional Model:** The demand used is the local consumer demand at that location. The lead time is the lead time from the external supplier.
-    * **Multi-Echelon Model:** The demand for an upstream location (e.g., a distribution center) is the aggregate demand from all the downstream locations it serves (e.g., all the retail stores it supplies). The lead time is the transit time from the immediate upstream supplier.
-
-    **2. Stockout Rate**
-    The stockout rate is a key performance indicator from the inventory simulation. It is calculated for each SKU-Location combination.
-    $$ Stockout Rate (\% ) = \frac{\text{Number of units of lost sales}}{\text{Total demand}} \times 100 $$
-    The simulation now tracks the quantity of lost sales, providing a more accurate metric.
-
-    ---
-    ### ❓ Frequently Asked Questions
-    **Q: How does the new simulation work?**
-    **A:** The `Multi-Echelon` simulation now runs daily. It starts at the retail store level, fulfilling customer demand for each SKU. If a store's inventory falls below its reorder point, it places an order with its supplying distribution center. The simulation then moves to the next day, and these orders become the demand for the distribution centers. The same logic applies from the DCs to the factories, creating a realistic, time-sensitive simulation of the entire supply chain.
+# --- Results and Visualizations ---
+if not st.session_state.kpis_df.empty:
+    st.header("Simulation Results")
     
-    **Q: What does the `BOM` check do?**
-    **A:** When enabled, the simulation will only allow a factory to fulfill an order if it has all the necessary components for that SKU in its `component_inventory`. If a component is missing, the order cannot be fulfilled, which will lead to a delayed shipment and a potential stockout at the downstream location, accurately reflecting real-world production constraints.
+    # KPI Plots
+    st.subheader("Overall KPIs (Simulation)")
     
-    **Q: How can I use the new cost data?**
-    **A:** The app now provides `Total_Holding_Cost`, `Total_Ordering_Cost`, and `Total_Stockout_Cost`. You can use these values to evaluate the performance of your inventory policy (e.g., reorder point and order quantity). The goal of a comprehensive optimization model would be to find a policy that minimizes the sum of these three costs.
-    """)
+    # Total Cost Plot
+    fig_cost = px.line(
+        st.session_state.kpis_df,
+        x="Date",
+        y="Total_Cost",
+        title="Cumulative Total Cost over Time",
+        labels={"Total_Cost": "Cumulative Total Cost ($)", "Date": "Date"},
+        color_discrete_sequence=['red']
+    )
+    fig_cost.update_layout(hovermode="x unified")
+    st.plotly_chart(fig_cost, use_container_width=True)
+    
+    # Inventory Level Plot
+    fig_inv = px.line(
+        st.session_state.kpis_df,
+        x="Date",
+        y="Total_Inventory_Level",
+        title="Total Inventory Level over Time",
+        labels={"Total_Inventory_Level": "Total Inventory Level (Units)", "Date": "Date"},
+        color_discrete_sequence=['blue']
+    )
+    fig_inv.update_layout(hovermode="x unified")
+    st.plotly_chart(fig_inv, use_container_width=True)
+
+    # Detailed costs
+    st.subheader("Detailed Costs")
+    cost_df_long = st.session_state.kpis_df[['Date', 'Total_Holding_Cost', 'Total_Ordering_Cost', 'Total_Stockout_Cost']]
+    cost_df_long = cost_df_long.melt(id_vars='Date', var_name='Cost Type', value_name='Cumulative Cost')
+    
+    fig_costs = px.line(
+        cost_df_long,
+        x="Date",
+        y="Cumulative Cost",
+        color="Cost Type",
+        title="Cumulative Costs Breakdown",
+        labels={"Cumulative Cost": "Cost ($)", "Date": "Date"}
+    )
+    fig_costs.update_layout(hovermode="x unified")
+    st.plotly_chart(fig_costs, use_container_width=True)
+
+
+    # Network Visualization
+    st.subheader("Supply Chain Network Visualization")
+    if not st.session_state.network_df.empty:
+        g = graphviz.Digraph(comment='Supply Chain Network')
+        
+        # Add nodes
+        for _, row in st.session_state.network_df.iterrows():
+            g.node(row['Source_Location'], row['Source_Location'])
+            g.node(row['Destination_Location'], row['Destination_Location'])
+        
+        # Add edges
+        for _, row in st.session_state.network_df.iterrows():
+            g.edge(row['Source_Location'], row['Destination_Location'], label=f"{row['Transit_Time_Days']} days")
+            
+        st.graphviz_chart(g)
+    else:
+        st.warning("No network data found to visualize.")
