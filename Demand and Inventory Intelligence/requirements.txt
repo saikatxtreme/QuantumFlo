@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+scikit-learn
+xgboost
+scipy
+prophet # This is the package name for 'from prophet import Prophet'
+statsmodels
+plotly
+graphviz # This is the Python package for graphviz
