@@ -632,6 +632,15 @@ st.set_page_config(layout="wide", page_title="Supply Chain App")
 st.title("Advanced Supply Chain Intelligence App")
 st.markdown("Analyze demand, simulate your supply chain, and optimize inventory policy with custom data.")
 
+# Initialize session state for data and results if not already present
+if 'all_dfs' not in st.session_state:
+    st.session_state.all_dfs = {}
+if 'simulation_results' not in st.session_state:
+    st.session_state.simulation_results = None
+if 'df_sales_for_plot' not in st.session_state: # To store df_sales for plotting forecast line
+    st.session_state.df_sales_for_plot = pd.DataFrame()
+
+
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
 
@@ -736,7 +745,6 @@ if run_simulation_button:
         if not all(all_dfs.get(f) is not None and not all_dfs.get(f).empty for f in required_files):
             st.error("Cannot run simulation. One or more required data files are missing or empty.")
         else:
-            # Determine simulation start and end dates based on historical sales and forecast horizon
             # Ensure 'Date' column is datetime type for operations
             if 'Date' in df_sales.columns:
                 df_sales['Date'] = pd.to_datetime(df_sales['Date'])
@@ -744,6 +752,7 @@ if run_simulation_button:
                 st.error("Sales data must contain a 'Date' column.")
                 st.stop() # Stop execution if date column is missing
 
+            # Determine simulation start and end dates based on historical sales and forecast horizon
             sim_start_date = df_sales['Date'].min()
             sim_end_date = df_sales['Date'].max() + timedelta(days=forecast_horizon_days)
 
@@ -763,62 +772,74 @@ if run_simulation_button:
                 forecast_window_size # Pass forecast_window_size
             )
             
-            st.markdown("---")
-            st.subheader("Simulation Key Performance Indicators")
-            col1, col2, col3 = st.columns(3)
-            
-            total_cost = simulation_results['total_holding_cost'] + simulation_results['total_ordering_cost'] + simulation_results['total_stockout_cost']
-            service_level_perc = 100 * (1 - (simulation_results['total_lost_sales'] / simulation_results['total_sales_demand'])) if simulation_results['total_sales_demand'] > 0 else 100
-            
-            col1.metric("Total Cost", f"${total_cost:,.2f}")
-            col2.metric("Total Lost Sales", f"{simulation_results['total_lost_sales']:,}")
-            col3.metric("Service Level", f"{service_level_perc:,.2f}%")
-            
-            with st.expander("Cost Breakdown"):
-                st.write(f"**Total Holding Cost:** ${simulation_results['total_holding_cost']:,.2f}")
-                st.write(f"**Total Ordering Cost:** ${simulation_results['total_ordering_cost']:,.2f}")
-                st.write(f"**Total Stockout Cost:** ${simulation_results['total_stockout_cost']:,.2f}")
+            # Store results and df_sales for persistence
+            st.session_state.all_dfs = all_dfs # Store all dataframes
+            st.session_state.simulation_results = simulation_results
+            st.session_state.df_sales_for_plot = df_sales # Store df_sales specifically for plotting vline
 
-            st.markdown("---")
+# Display results if simulation has been run (either now or previously)
+if st.session_state.simulation_results is not None:
+    simulation_results = st.session_state.simulation_results
+    df_sales = st.session_state.df_sales_for_plot # Retrieve df_sales for plotting
 
-            st.subheader("Forecasted Demand Data")
-            if not simulation_results['df_forecast'].empty:
-                st.dataframe(simulation_results['df_forecast'], use_container_width=True)
-            else:
-                st.info("No forecasted demand data to display (perhaps the forecast horizon is 0 or less, or historical sales data is empty).")
-            
-            st.markdown("---")
-            
-            st.subheader("Inventory Levels Over Time")
-            all_locations = simulation_results['df_inventory_history']['Location'].unique()
-            all_items = simulation_results['df_inventory_history']['Item_ID'].unique()
-            
-            selected_location = st.selectbox("Select Location", all_locations)
-            selected_item = st.selectbox("Select SKU/Component", all_items)
-            
-            df_plot = simulation_results['df_inventory_history']
-            df_plot = df_plot[(df_plot['Location'] == selected_location) & (df_plot['Item_ID'] == selected_item)]
-            
-            if not df_plot.empty:
-                fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
-                
-                # Add forecast start line
-                if not df_sales.empty and 'Date' in df_sales.columns:
-                    fig.add_vline(x=df_sales['Date'].max().to_pydatetime(), line_dash="dash", line_color="red", annotation_text="Forecast Start", annotation_position="top right")
-                else:
-                    st.warning("Cannot show forecast start line as historical sales data is empty or 'Date' column is missing.")
+    st.markdown("---")
+    st.subheader("Simulation Key Performance Indicators")
+    col1, col2, col3 = st.columns(3)
+    
+    total_cost = simulation_results['total_holding_cost'] + simulation_results['total_ordering_cost'] + simulation_results['total_stockout_cost']
+    service_level_perc = 100 * (1 - (simulation_results['total_lost_sales'] / simulation_results['total_sales_demand'])) if simulation_results['total_sales_demand'] > 0 else 100
+    
+    col1.metric("Total Cost", f"${total_cost:,.2f}")
+    col2.metric("Total Lost Sales", f"{simulation_results['total_lost_sales']:,}")
+    col3.metric("Service Level", f"{service_level_perc:,.2f}%")
+    
+    with st.expander("Cost Breakdown"):
+        st.write(f"**Total Holding Cost:** ${simulation_results['total_holding_cost']:,.2f}")
+        st.write(f"**Total Ordering Cost:** ${simulation_results['total_ordering_cost']:,.2f}")
+        st.write(f"**Total Stockout Cost:** ${simulation_results['total_stockout_cost']:,.2f}")
 
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No inventory data to display for the selected item and location.")
-                
-            st.markdown("---")
-            st.subheader("Detailed Simulation Events & Alerts")
-            with st.expander("View Event Log"):
-                if not simulation_results['df_simulation_events'].empty:
-                    st.dataframe(simulation_results['df_simulation_events'], use_container_width=True)
-                else:
-                    st.info("No events to display.")
+    st.markdown("---")
+
+    st.subheader("Forecasted Demand Data")
+    if not simulation_results['df_forecast'].empty:
+        st.dataframe(simulation_results['df_forecast'], use_container_width=True)
+    else:
+        st.info("No forecasted demand data to display (perhaps the forecast horizon is 0 or less, or historical sales data is empty).")
+    
+    st.markdown("---")
+    
+    st.subheader("Inventory Levels Over Time")
+    all_locations = simulation_results['df_inventory_history']['Location'].unique()
+    all_items = simulation_results['df_inventory_history']['Item_ID'].unique()
+    
+    selected_location = st.selectbox("Select Location", all_locations)
+    selected_item = st.selectbox("Select SKU/Component", all_items)
+    
+    df_plot = simulation_results['df_inventory_history']
+    df_plot = df_plot[(df_plot['Location'] == selected_location) & (df_plot['Item_ID'] == selected_item)]
+    
+    if not df_plot.empty:
+        fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
+        
+        # Add forecast start line
+        if not df_sales.empty and 'Date' in df_sales.columns:
+            # Convert datetime to string for add_vline to avoid TypeError
+            forecast_start_vline_x = str(df_sales['Date'].max().date())
+            fig.add_vline(x=forecast_start_vline_x, line_dash="dash", line_color="red", annotation_text="Forecast Start", annotation_position="top right")
+        else:
+            st.warning("Cannot show forecast start line as historical sales data is empty or 'Date' column is missing.")
+
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No inventory data to display for the selected item and location.")
+        
+    st.markdown("---")
+    st.subheader("Detailed Simulation Events & Alerts")
+    with st.expander("View Event Log"):
+        if not simulation_results['df_simulation_events'].empty:
+            st.dataframe(simulation_results['df_simulation_events'], use_container_width=True)
+        else:
+            st.info("No events to display.")
 
 
 else:
