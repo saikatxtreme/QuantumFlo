@@ -1,12 +1,6 @@
-# Ensure core build dependencies are installed first
-numpy==1.26.2
-cython==0.29.36
-pystan==2.19.1.1
-
-# Then the rest of the packages
 streamlit==1.28.2
 pandas==2.1.3
 scikit-learn==1.3.2
 xgboost==2.0.2
 scipy==1.11.4
-prophet==1.1
+numpy==1.26.2
