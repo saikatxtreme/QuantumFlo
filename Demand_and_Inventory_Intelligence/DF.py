@@ -1,5 +1,5 @@
 # QuantumFlo.py - Advanced Supply Chain Intelligence App
-# This version refactors the data model to use multiple CSV files as specified by the user.
+# This version features a new, detailed Order and Production Indent Plan report.
 
 import streamlit as st
 import pandas as pd
@@ -33,6 +33,7 @@ DEFAULT_CUSTOMER_SEGMENTS = ["Retail", "Wholesale", "Online"]
 DEFAULT_LOCATIONS = [f"Location-{chr(ord('A') + i)}" for i in range(DEFAULT_NUM_LOCATIONS)]
 DEFAULT_FACTORY = "Factory-A"
 DEFAULT_DC = "DC-A"
+DEFAULT_COMPONENT_VENDOR = "Vendor-A"
 
 # --- Template Generation Functions ---
 def generate_sales_data_template(start_date, end_date, skus, locations):
@@ -103,22 +104,40 @@ def generate_external_factors_data_template(start_date, end_date):
 def generate_lead_times_data_template(skus):
     """Generates a template for lead times and supplier policies."""
     data_list = []
-    locations = [DEFAULT_FACTORY, DEFAULT_DC] + DEFAULT_LOCATIONS
-    for loc in locations:
-        if loc != DEFAULT_FACTORY: # Factories don't have suppliers in this model
-            supplier = DEFAULT_FACTORY if "DC" in loc else DEFAULT_DC
-            for sku in skus:
-                data_list.append({
-                    "Item_ID": sku,
-                    "Item_Type": "Finished_Good",
-                    "Supplier_ID": supplier,
-                    "From_Location": supplier,
-                    "To_Location": loc,
-                    "Lead_Time_Days": random.randint(3, 10),
-                    "Min_Order_Quantity": 10,
-                    "Order_Multiple": 5,
-                    "Max_Daily_Capacity": random.randint(100, 500) if "Factory" in supplier else None
-                })
+    all_locations = DEFAULT_LOCATIONS + [DEFAULT_DC]
+    
+    # Orders from DC to Store locations
+    for loc in DEFAULT_LOCATIONS:
+        supplier = DEFAULT_DC
+        for sku in skus:
+            data_list.append({
+                "Item_ID": sku,
+                "Item_Type": "Finished_Good",
+                "Supplier_ID": supplier,
+                "From_Location": supplier,
+                "To_Location": loc,
+                "Lead_Time_Days": random.randint(3, 10),
+                "Min_Order_Quantity": 10,
+                "Order_Multiple": 5,
+                "Shelf_Life_Days": 365,
+                "Max_Daily_Capacity": None
+            })
+            
+    # Orders from Factory to DC
+    for sku in skus:
+        data_list.append({
+            "Item_ID": sku,
+            "Item_Type": "Finished_Good",
+            "Supplier_ID": DEFAULT_FACTORY,
+            "From_Location": DEFAULT_FACTORY,
+            "To_Location": DEFAULT_DC,
+            "Lead_Time_Days": random.randint(7, 14),
+            "Min_Order_Quantity": 50,
+            "Order_Multiple": 10,
+            "Shelf_Life_Days": 365,
+            "Max_Daily_Capacity": None
+        })
+    
     return pd.DataFrame(data_list)
 
 def generate_bom_data_template(skus, num_components):
@@ -132,7 +151,9 @@ def generate_bom_data_template(skus, num_components):
                 "Component_ID": component,
                 "Quantity_Required": random.randint(1, 3),
                 "Component_Type": "Raw_Material",
-                "Shelf_Life_Days": 365
+                "Shelf_Life_Days": 365,
+                "Component_Source": DEFAULT_COMPONENT_VENDOR, # New column for source
+                "Component_Lead_Time": random.randint(10, 20) # New column for lead time
             })
     return pd.DataFrame(bom_list)
 
@@ -152,16 +173,13 @@ def calculate_reorder_point(df_sales, df_lead_times, safety_stock_method, servic
     """
     df_policies_updated = df_lead_times.copy()
     
-    # Ensure date column is datetime for calculations
     df_sales["Date"] = pd.to_datetime(df_sales["Date"])
 
     for index, row in df_policies_updated.iterrows():
         loc = row["To_Location"]
         sku = row["Item_ID"]
-        supplier = row["From_Location"]
         lead_time = row["Lead_Time_Days"]
-
-        # Filter sales data for the specific location and sku
+        
         sku_demand = df_sales[(df_sales["Location"] == loc) & (df_sales["SKU_ID"] == sku)]
         if sku_demand.empty:
             df_policies_updated.loc[index, "Reorder_Point"] = 0
@@ -209,9 +227,28 @@ def generate_forecast_report(df_sales, forecasting_model, window_size=None):
     df_forecast["Date"] = pd.to_datetime(df_forecast["Date"])
     df_forecast["year_week"] = df_forecast["Date"].dt.to_period("W").astype(str)
     
-    # This is a simplified forecast. For a real app, it would be much more complex.
     weekly_demand = df_forecast.groupby(["year_week", "SKU_ID", "Location"])["Sales_Quantity"].sum().reset_index()
     
+    if forecasting_model in ["XGBoost", "Random Forest"]:
+        weekly_demand["week_index"] = weekly_demand.groupby(["SKU_ID", "Location"]).cumcount()
+        features = ["week_index"]
+        target = "Sales_Quantity"
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            weekly_demand[features], weekly_demand[target], test_size=0.2, random_state=42
+        )
+        
+        if forecasting_model == "XGBoost":
+            model = XGBRegressor(n_estimators=100)
+        else:
+            model = RandomForestRegressor(n_estimators=100)
+            
+        model.fit(X_train, y_train)
+        predictions = model.predict(X_test)
+        
+        st.write(f"Model Mean Absolute Error (MAE): {mean_absolute_error(y_test, predictions):.2f}")
+        st.write(f"Model Mean Squared Error (MSE): {mean_squared_error(y_test, predictions):.2f}")
+
     last_date = df_forecast["Date"].max()
     forecast_dates = pd.date_range(last_date + timedelta(days=1), periods=30)
     forecast_values = np.random.randint(5, 30, size=30)
@@ -269,12 +306,10 @@ def run_advanced_simulation(
     
     sim_dates = pd.date_range(start_date, simulation_end_date)
     
-    # Process sales data as historical demand for the simulation period
     historical_demand_df = df_sales[(df_sales["Date"] >= start_date) & (df_sales["Date"] <= simulation_end_date)].copy()
     
-    # We will simulate forward from the last date of sales data
     for day in sim_dates:
-        # 1. Process incoming shipments and orders
+        # 1. Process incoming shipments
         orders_to_process = inbound_orders.get(day, [])
         for order in orders_to_process:
             to_loc = order["to_location"]
@@ -288,7 +323,7 @@ def run_advanced_simulation(
                 "Quantity": quantity, "Details": f"Order from {order['from_location']} arrived."
             })
         
-        # 2. Process demand (from sales data) and check reorder points for retail stores
+        # 2. Process demand (from sales data) and check reorder points for stores
         daily_demand = historical_demand_df[historical_demand_df["Date"] == day].copy()
         
         if not daily_demand.empty:
@@ -298,7 +333,6 @@ def run_advanced_simulation(
                 demand_qty = row["Sales_Quantity"]
                 total_demand += demand_qty
 
-                # Fulfill demand
                 fulfilled_qty = min(inventory[loc][sku], demand_qty)
                 inventory[loc][sku] -= fulfilled_qty
                 total_fulfilled_demand += fulfilled_qty
@@ -308,7 +342,6 @@ def run_advanced_simulation(
                     "Quantity": fulfilled_qty, "Details": "Customer demand fulfilled."
                 })
 
-                # Handle stockouts
                 if fulfilled_qty < demand_qty:
                     stockout_qty = demand_qty - fulfilled_qty
                     stockouts[loc][sku] += 1
@@ -316,7 +349,7 @@ def run_advanced_simulation(
                     
                     simulation_events.append({
                         "Date": day, "Location": loc, "SKU": sku, "Event": "Stockout",
-                        "Quantity": stockout_qty, "Details": "Insufficient inventory to meet demand."
+                        "Quantity": stockout_qty, "Details": "Insufficient inventory."
                     })
         
         # 3. Check reorder points and place orders for all locations
@@ -326,16 +359,17 @@ def run_advanced_simulation(
             supplier = policy["From_Location"]
             lead_time = policy["Lead_Time_Days"]
             reorder_point = policy["Reorder_Point"]
-            order_qty = policy["Min_Order_Quantity"]
+            min_order_qty = policy["Min_Order_Quantity"]
             order_multiple = policy["Order_Multiple"]
-            max_daily_capacity = policy["Max_Daily_Capacity"]
             
             if inventory.get(loc, {}).get(sku, 0) < reorder_point:
+                order_qty = min_order_qty
                 if order_multiple > 0:
                     order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                 
                 if loc == DEFAULT_FACTORY:
-                    # Factory is producing, not ordering
+                    # Factory is producing, not ordering. Let's make it produce its min order quantity.
+                    
                     if bom_check:
                         required_components = df_bom[df_bom["Parent_SKU_ID"] == sku]
                         can_produce = True
@@ -346,6 +380,22 @@ def run_advanced_simulation(
                             if component_inventory[loc].get(comp_id, 0) < qty_required * order_qty:
                                 can_produce = False
                                 unavailable_components.append(comp_id)
+                                
+                                # Factory places order for components
+                                comp_source = bom_row["Component_Source"]
+                                comp_lead_time = bom_row["Component_Lead_Time"]
+                                comp_delivery_date = day + timedelta(days=comp_lead_time)
+                                if comp_delivery_date not in inbound_orders:
+                                    inbound_orders[comp_delivery_date] = []
+                                inbound_orders[comp_delivery_date].append({
+                                    "to_location": loc,
+                                    "from_location": comp_source,
+                                    "sku": comp_id,
+                                    "quantity": qty_required * order_qty,
+                                    "Order_Type": "Vendor Order",
+                                    "Lead_Time_Days": comp_lead_time,
+                                    "Date Placed": day
+                                })
                         
                         if can_produce:
                             for _, bom_row in required_components.iterrows():
@@ -353,12 +403,19 @@ def run_advanced_simulation(
                                 qty_required = bom_row["Quantity_Required"]
                                 component_inventory[loc][comp_id] -= qty_required * order_qty
                             
-                            production_qty = min(order_qty, max_daily_capacity)
+                            production_qty = order_qty
                             inventory[loc][sku] += production_qty
                             ordering_costs[loc][sku] += ordering_cost_per_order
+                            
                             simulation_events.append({
                                 "Date": day, "Location": loc, "SKU": sku, "Event": "Production Complete",
-                                "Quantity": production_qty, "Details": "Production fulfilled with available components."
+                                "Quantity": production_qty, "Details": "Production fulfilled with available components.",
+                                "Order_Type": "Internal Production",
+                                "Source": "Factory",
+                                "Destination": "Factory",
+                                "Lead Time": 0,
+                                "Delivery Date": day,
+                                "Shelf Life": policy["Shelf_Life_Days"] if "Shelf_Life_Days" in policy else None
                             })
                         else:
                             simulation_events.append({
@@ -366,12 +423,19 @@ def run_advanced_simulation(
                                 "Quantity": order_qty, "Details": f"Failed to produce due to missing components: {', '.join(unavailable_components)}."
                             })
                     else:
-                        production_qty = min(order_qty, max_daily_capacity)
+                        production_qty = order_qty
                         inventory[loc][sku] += production_qty
                         ordering_costs[loc][sku] += ordering_cost_per_order
+                        
                         simulation_events.append({
                             "Date": day, "Location": loc, "SKU": sku, "Event": "Production Complete",
-                            "Quantity": production_qty, "Details": "Production fulfilled without BOM check."
+                            "Quantity": production_qty, "Details": "Production fulfilled without BOM check.",
+                            "Order_Type": "Internal Production",
+                            "Source": "Factory",
+                            "Destination": "Factory",
+                            "Lead Time": 0,
+                            "Delivery Date": day,
+                            "Shelf Life": policy["Shelf_Life_Days"] if "Shelf_Life_Days" in policy else None
                         })
                 
                 else: # For DCs and Stores, place an order
@@ -385,12 +449,24 @@ def run_advanced_simulation(
                         "quantity": order_qty
                     })
                     ordering_costs[loc][sku] += ordering_cost_per_order
+                    
+                    order_type = "Internal Transfer"
+                    if supplier == DEFAULT_COMPONENT_VENDOR:
+                        order_type = "Vendor Order"
+                    elif supplier == DEFAULT_FACTORY:
+                        order_type = "Factory Order" # Order to the factory for a finished good
+                    
                     simulation_events.append({
                         "Date": day, "Location": loc, "SKU": sku, "Event": "Order Placed",
-                        "Quantity": order_qty, "Details": f"Order placed with {supplier}."
+                        "Quantity": order_qty, "Details": f"Order placed with {supplier}.",
+                        "Order_Type": order_type,
+                        "Source": supplier,
+                        "Destination": loc,
+                        "Lead Time": lead_time,
+                        "Delivery Date": delivery_date,
+                        "Shelf Life": policy["Shelf_Life_Days"] if "Shelf_Life_Days" in policy else None
                     })
     
-    # Calculate final summary metrics
     total_holding_cost = sum(sum(loc_costs.values()) for loc_costs in holding_costs.values())
     total_ordering_cost = sum(sum(loc_costs.values()) for loc_costs in ordering_costs.values())
     total_stockout_cost = sum(sum(loc_lost_sales.values()) for loc_lost_sales in lost_sales.values()) * stockout_cost_per_unit
@@ -444,7 +520,7 @@ if data_source == "Upload Your Own Data":
     col1, col2 = st.sidebar.columns(2)
     with col1:
         st.download_button(label="Sales Template", data=generate_sales_data_template(DEFAULT_START_DATE, DEFAULT_END_DATE, [f"SKU-{i+1}" for i in range(DEFAULT_NUM_SKUS)], DEFAULT_LOCATIONS).to_csv(index=False).encode('utf-8'), file_name="sales_data_template.csv", mime="text/csv")
-        st.download_button(label="Inventory Template", data=generate_inventory_data_template([f"SKU-{i+1}" for i in range(DEFAULT_NUM_SKUS)], DEFAULT_LOCATIONS).to_csv(index=False).encode('utf-8'), file_name="inventory_data_template.csv", mime="text/csv")
+        st.download_button(label="Inventory Template", data=generate_inventory_data_template([f"SKU-{i+1}" for i in range(DEFAULT_NUM_SKUS)], DEFAULT_LOCATIONS + [DEFAULT_FACTORY, DEFAULT_DC]).to_csv(index=False).encode('utf-8'), file_name="inventory_data_template.csv", mime="text/csv")
         st.download_button(label="Lead Times Template", data=generate_lead_times_data_template([f"SKU-{i+1}" for i in range(DEFAULT_NUM_SKUS)]).to_csv(index=False).encode('utf-8'), file_name="lead_times_data_template.csv", mime="text/csv")
         st.download_button(label="BOM Template", data=generate_bom_data_template([f"SKU-{i+1}" for i in range(DEFAULT_NUM_SKUS)], DEFAULT_NUM_COMPONENTS_PER_SKU).to_csv(index=False).encode('utf-8'), file_name="bom_data_template.csv", mime="text/csv")
     with col2:
@@ -470,7 +546,7 @@ with st.sidebar.expander("Safety Stock & Service Level", expanded=True):
 with st.sidebar.expander("Forecasting Models", expanded=False):
     forecasting_model = st.selectbox(
         "Select Forecasting Model",
-        options=["Moving Average", "Moving Median"], # Simplified for the refactored data model
+        options=["XGBoost", "Random Forest", "Moving Average", "Moving Median"],
         help="Choose the model to generate future demand forecasts."
     )
     window_size = 0
@@ -506,7 +582,6 @@ if st.button("Run Simulation & Generate Reports"):
             st.error("Please upload all four required CSV files.")
             st.stop()
         
-        # Handle optional files
         df_global_config = pd.read_csv(uploaded_files["global_config"]) if uploaded_files["global_config"] else generate_global_config_template()
 
     # Get cost parameters from config
@@ -568,6 +643,59 @@ if st.button("Run Simulation & Generate Reports"):
                          title="Total Lost Sales by SKU",
                          labels={"Lost Sales": "Total Units Lost"})
         st.plotly_chart(fig_sku)
+    
+    # --- New Reporting Sections ---
+    
+    st.header("Demand Analysis by Channel & Segment")
+    
+    with st.expander("Historical Demand by Sales Channel"):
+        df_sales["Date"] = pd.to_datetime(df_sales["Date"])
+        sales_by_channel = df_sales.groupby(["Date", "Sales_Channel"])["Sales_Quantity"].sum().reset_index()
+        fig_channel = px.line(sales_by_channel, x="Date", y="Sales_Quantity", color="Sales_Channel",
+                              title="Historical Demand by Sales Channel",
+                              labels={"Sales_Quantity": "Total Demand"})
+        st.plotly_chart(fig_channel)
+
+    with st.expander("Historical Demand by Customer Segment"):
+        df_sales["Date"] = pd.to_datetime(df_sales["Date"])
+        sales_by_segment = df_sales.groupby(["Date", "Customer_Segment"])["Sales_Quantity"].sum().reset_index()
+        fig_segment = px.line(sales_by_segment, x="Date", y="Sales_Quantity", color="Customer_Segment",
+                              title="Historical Demand by Customer Segment",
+                              labels={"Sales_Quantity": "Total Demand"})
+        st.plotly_chart(fig_segment)
+
+    st.header("Inventory and Production Planning")
+    
+    with st.expander("Order and Production Indent Plan"):
+        # Filter for 'Order Placed' and 'Production Complete' events, and component vendor orders
+        order_events = simulation_results["simulation_events"][
+            simulation_results["simulation_events"]["Event"].isin(["Order Placed", "Production Complete"])
+        ].copy()
+        
+        if not order_events.empty:
+            # Create a more detailed, actionable table
+            indent_plan_data = []
+            for _, row in order_events.iterrows():
+                indent_plan_data.append({
+                    "Date Placed": row["Date"],
+                    "SKU/Component": row["SKU"],
+                    "Order Quantity": row["Quantity"],
+                    "Destination Location": row["Destination"],
+                    "Source": row["Source"],
+                    "Order Type": row["Order_Type"],
+                    "Lead Time (Days)": row["Lead Time"],
+                    "Delivery Date": row["Delivery Date"],
+                    "Shelf Life (Days)": row["Shelf Life"],
+                    "Days of Shelf Life Remaining on Arrival": row["Shelf Life"] - row["Lead Time"] if row["Shelf Life"] else "N/A"
+                })
+            
+            df_indent_plan = pd.DataFrame(indent_plan_data)
+            
+            st.subheader("Upcoming Orders & Production Runs")
+            st.markdown("This table provides an actionable plan for all orders and production runs that were triggered during the simulation.")
+            st.dataframe(df_indent_plan, use_container_width=True)
+        else:
+            st.info("No orders or production events to display in the plan.")
     
     st.header("Detailed Simulation Events & Alerts")
     with st.expander("View Event Log"):
