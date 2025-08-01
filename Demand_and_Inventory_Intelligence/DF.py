@@ -1,6 +1,7 @@
-# DFv13.py - Demand and Inventory Intelligence Streamlit App
+# DFv15.py - Demand and Inventory Intelligence Streamlit App
 # Features: Full multi-echelon simulation, detailed cost analysis, BOM integration,
-#           comprehensive reporting, and now includes a forecast model selector and FAQ.
+#           comprehensive reporting, now includes forecast model selector, FAQ,
+#           and flexible forecast horizon units.
 
 import streamlit as st
 import pandas as pd
@@ -709,13 +710,22 @@ else:
     run_simulation_button = st.sidebar.button("Run Simulation with Sample Data")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Simulation Parameters")
-simulation_days = st.sidebar.slider("Simulation Duration (days)", 30, 365, 90)
+# Simulation Duration slider is removed. Duration is derived from data.
 
-st.sidebar.markdown("---")
 st.sidebar.subheader("Forecasting Parameters")
 forecast_model = st.sidebar.selectbox("Forecasting Model", ["Moving Average", "Moving Median", "Random Forest", "XGBoost"])
-forecast_duration_days = st.sidebar.slider("Forecast Duration (days beyond historical data)", 0, 365, 30) # New slider
+
+# Reinstated Forecast Duration slider with unit selection
+forecast_duration_value = st.sidebar.slider("Forecast Duration", 1, 365, 30)
+forecast_unit = st.sidebar.radio("Forecast Unit", ["Days", "Weeks", "Months"])
+
+# Calculate actual forecast_duration_days based on unit
+if forecast_unit == "Days":
+    actual_forecast_duration_days = forecast_duration_value
+elif forecast_unit == "Weeks":
+    actual_forecast_duration_days = forecast_duration_value * 7
+else: # Months
+    actual_forecast_duration_days = forecast_duration_value * 30
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Inventory Policy")
@@ -752,10 +762,12 @@ if run_simulation_button:
             st.error("Cannot run simulation. One or more required data files are missing or empty.")
             st.session_state.simulation_results = None # Clear previous results on error
         else:
-            # Determine simulation start and end dates
-            df_sales['Date'] = pd.to_datetime(df_sales['Date']) # Ensure Date column is datetime
+            # Ensure Date column is datetime
+            df_sales['Date'] = pd.to_datetime(df_sales['Date']) 
+            
+            # Determine simulation start and end dates based on sales data + forecast horizon
             sim_start_date = df_sales['Date'].min()
-            sim_end_date = sim_start_date + timedelta(days=simulation_days - 1)
+            sim_end_date = df_sales['Date'].max() + timedelta(days=actual_forecast_duration_days) # Simulation runs till end of forecast
 
             # Run the full simulation
             st.session_state.simulation_results = run_full_simulation(
@@ -770,7 +782,7 @@ if run_simulation_button:
                 service_level,
                 bom_check,
                 forecast_model,
-                forecast_duration_days # Pass the new parameter
+                actual_forecast_duration_days # Pass the calculated forecast duration
             )
             st.success("Simulation complete!")
 
@@ -841,9 +853,6 @@ if st.session_state.simulation_results:
         # Filtering for event types
         event_types = df_simulation_events['Type'].unique()
         selected_event_types = st.multiselect("Filter by Event Type", event_types, default=event_types)
-        
-        # Filtering for specific locations/items (optional, can be extensive)
-        # For simplicity, let's keep it to event types for now
         
         filtered_events = df_simulation_events[df_simulation_events['Type'].isin(selected_event_types)]
 
