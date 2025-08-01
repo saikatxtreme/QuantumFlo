@@ -398,9 +398,9 @@ def run_full_simulation(
     # Pre-process sales data for quick lookup
     df_sales['Date'] = pd.to_datetime(df_sales['Date'])
     
-    # Generate forecast demand for the simulation period
+    # Determine forecast period
     forecast_start_date = df_sales['Date'].max() + timedelta(days=1)
-    forecast_end_date = end_date
+    forecast_end_date = end_date # Simulation end date is now the forecast end date
     forecast_days = (forecast_end_date - forecast_start_date).days + 1
     
     df_forecast = pd.DataFrame() # Initialize df_forecast
@@ -686,12 +686,15 @@ else:
     run_simulation_button = st.sidebar.button("Run Simulation with Sample Data")
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Simulation Parameters")
-simulation_days = st.sidebar.slider("Simulation Duration (days)", 30, 365, 90)
+# Removed "Simulation Duration (days)"
+# st.sidebar.subheader("Simulation Parameters")
+# simulation_days = st.sidebar.slider("Simulation Duration (days)", 30, 365, 90)
 
-st.sidebar.markdown("---")
 st.sidebar.subheader("Forecasting Parameters")
 forecast_model = st.sidebar.selectbox("Forecasting Model", ["Moving Average", "Moving Median", "Random Forest", "XGBoost"])
+
+# New slider for Forecast Horizon (days)
+forecast_horizon_days = st.sidebar.slider("Forecast Horizon (days)", 1, 365, 30)
 
 # New slider for window size
 if forecast_model in ["Moving Average", "Moving Median"]:
@@ -733,9 +736,16 @@ if run_simulation_button:
         if not all(all_dfs.get(f) is not None and not all_dfs.get(f).empty for f in required_files):
             st.error("Cannot run simulation. One or more required data files are missing or empty.")
         else:
-            # Determine simulation start and end dates
+            # Determine simulation start and end dates based on historical sales and forecast horizon
+            # Ensure 'Date' column is datetime type for operations
+            if 'Date' in df_sales.columns:
+                df_sales['Date'] = pd.to_datetime(df_sales['Date'])
+            else:
+                st.error("Sales data must contain a 'Date' column.")
+                st.stop() # Stop execution if date column is missing
+
             sim_start_date = df_sales['Date'].min()
-            sim_end_date = sim_start_date + timedelta(days=simulation_days - 1)
+            sim_end_date = df_sales['Date'].max() + timedelta(days=forecast_horizon_days)
 
             # Run the full simulation
             simulation_results = run_full_simulation(
@@ -775,7 +785,7 @@ if run_simulation_button:
             if not simulation_results['df_forecast'].empty:
                 st.dataframe(simulation_results['df_forecast'], use_container_width=True)
             else:
-                st.info("No forecasted demand data to display (perhaps the simulation period is entirely within historical data).")
+                st.info("No forecasted demand data to display (perhaps the forecast horizon is 0 or less, or historical sales data is empty).")
             
             st.markdown("---")
             
@@ -859,8 +869,8 @@ with st.expander("How is the cost data used?"):
 with st.expander("What are the different forecasting models?"):
     st.markdown("""
         The app offers four methods for forecasting future demand based on historical sales data:
-        * **Moving Average:** A simple model that predicts the next period's demand by taking the average of sales over a specified historical window.
-        * **Moving Median:** Similar to the moving average, but uses the median value, which can be more robust to outliers in sales data.
+        * **Moving Average:** A simple model that predicts the next period's demand by taking the average of sales over a specified historical window. The window size is now configurable in the sidebar.
+        * **Moving Median:** Similar to the moving average, but uses the median value, which can be more robust to outliers in sales data. The window size is now configurable in the sidebar.
         * **Random Forest:** A powerful machine learning model that uses an ensemble of decision trees to predict future demand based on patterns in your historical data.
         * **XGBoost:** Another advanced machine learning model, known for its performance and speed. It uses a gradient boosting framework to build a robust predictive model.
     """)
