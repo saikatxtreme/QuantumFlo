@@ -261,7 +261,9 @@ def run_advanced_simulation(
     lost_sales = {loc: {sku: 0 for sku in skus} for loc in locations}
     stockouts = {loc: {sku: 0 for sku in skus} for loc in locations}
     wastage = {loc: {sku: 0 for sku in skus} for loc in locations}
-    holding_costs = {loc: {sku: 0 for sku for sku in skus} for loc in locations}
+    # Corrected dictionary comprehension for holding_costs
+    holding_costs = {loc: {sku: 0 for sku in skus} for loc in locations}
+    # Corrected dictionary comprehension for ordering_costs
     ordering_costs = {loc: {sku: 0 for sku in skus} for loc in locations}
     backlog = {loc: {sku: 0 for sku in skus} for loc in locations}
 
