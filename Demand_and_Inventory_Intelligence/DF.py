@@ -8,529 +8,623 @@ from xgboost import XGBRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from scipy.stats import norm
-from io import StringIO
-import base64
-import json
+import math # For math.ceil
+import graphviz # Import graphviz
 
-# --- Configuration for Data Generation and Inventory Policy ---
-# Using Streamlit's session state for persistent parameters
-if 'NUM_SKUS' not in st.session_state:
-    st.session_state.NUM_SKUS = 5
-if 'NUM_COMPONENTS_PER_SKU' not in st.session_state:
-    st.session_state.NUM_COMPONENTS_PER_SKU = 3
-if 'START_DATE' not in st.session_state:
-    st.session_state.START_DATE = datetime(2023, 1, 1)
-if 'END_DATE' not in st.session_state:
-    st.session_state.END_DATE = datetime(2024, 12, 31)
-if 'FORECAST_HORIZON_DAYS' not in st.session_state:
-    st.session_state.FORECAST_HORIZON_DAYS = 30
-if 'SERVICE_LEVEL' not in st.session_state:
-    st.session_state.SERVICE_LEVEL = 0.95
-if 'HOLDING_COST_PER_UNIT_PER_DAY' not in st.session_state:
-    st.session_state.HOLDING_COST_PER_UNIT_PER_DAY = 0.05
-if 'ORDERING_COST_PER_ORDER' not in st.session_state:
-    st.session_state.ORDERING_COST_PER_ORDER = 50.0
+# Prophet and ARIMA models have been removed as per the user's request due to dependency issues.
+# import from statsmodels.tsa.arima.model.ARIMA has been removed
+import warnings
+warnings.filterwarnings('ignore') # Suppress warnings from libraries, etc.
 
-# --- Helper Functions to Load Data from Session State or Uploaded Files ---
-def load_data(uploaded_file, default_data_func, **kwargs):
-    if uploaded_file is not None:
-        try:
-            dataframe = pd.read_csv(uploaded_file)
-            st.success(f"Successfully uploaded {uploaded_file.name}!")
-            return dataframe
-        except Exception as e:
-            st.error(f"Error reading file: {e}")
-            return None
-    else:
-        return default_data_func(**kwargs)
+# For Plotting
+import plotly.express as px
+import plotly.graph_objects as go
+
+# --- Configuration for Dummy Data Generation (used for templates and sample run) ---
+DEFAULT_NUM_SKUS = 5
+DEFAULT_NUM_COMPONENTS_PER_SKU = 3
+DEFAULT_START_DATE = datetime(2023, 1, 1)
+DEFAULT_END_DATE = datetime(2024, 12, 31)
+DEFAULT_PROMOTION_FREQUENCY_DAYS = 60
+DEFAULT_MAX_LEAD_TIME_DAYS = 30
+DEFAULT_MAX_SKU_SHELF_LIFE_DAYS = 365
+DEFAULT_SALES_CHANNELS = ["Distributor Network", "Amazon", "Own Website"]
+
+
+# --- Default Cost Parameters (used if global_config.csv is not uploaded) ---
+DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY = 0.10
+DEFAULT_ORDERING_COST_PER_ORDER = 50.00
 
 # --- Dummy Data Generation Functions (Unchanged) ---
-def generate_sales_data(num_skus, start_date, end_date):
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    sales_data = []
-    for i in range(1, num_skus + 1):
-        sku_id = f"SKU_{i:03d}"
-        base_demand = random.randint(50, 200)
-        seasonality_amplitude = base_demand * 0.3
-        trend_slope = random.uniform(0.01, 0.05)
-        for j, date in enumerate(dates):
-            seasonality = seasonality_amplitude * np.sin(2 * np.pi * (date.dayofyear / 365))
-            trend = trend_slope * j
-            noise = random.randint(-20, 20)
-            quantity = max(0, int(base_demand + seasonality + trend + noise))
-            sales_data.append({
-                "Date": date,
-                "SKU_ID": sku_id,
-                "Sales_Quantity": quantity,
-                "Price": round(random.uniform(10, 100), 2),
-                "Customer_Segment": random.choice(["Retail", "Wholesale", "Online"])
-            })
-    return pd.DataFrame(sales_data)
-
-def generate_inventory_data(sales_df, start_date):
-    inventory_data = []
-    initial_stock = {sku: random.randint(500, 1500) for sku in sales_df['SKU_ID'].unique()}
-    current_stock = initial_stock.copy()
-    dates = pd.date_range(start=start_date, end=sales_df['Date'].max(), freq='D')
-    for date in dates:
-        daily_sales = sales_df[sales_df['Date'] == date].set_index('SKU_ID')['Sales_Quantity']
-        for sku_id, stock in current_stock.items():
-            sold = daily_sales.get(sku_id, 0)
-            current_stock[sku_id] = max(0, stock - sold + random.randint(0, 50))
-            inventory_data.append({
-                "Date": date,
-                "SKU_ID": sku_id,
-                "Current_Stock": current_stock[sku_id]
-            })
-    return pd.DataFrame(inventory_data)
-
-def generate_promotion_data(sales_df, promo_frequency_days=60):
-    promotion_data = []
-    unique_dates = sorted(sales_df['Date'].unique())
-    unique_skus = sales_df['SKU_ID'].unique()
-    for i in range(0, len(unique_dates), promo_frequency_days):
-        promo_date = unique_dates[i]
-        num_promos = random.randint(1, 3)
-        skus_on_promo = random.sample(list(unique_skus), min(num_promos, len(unique_skus)))
-        for sku_id in skus_on_promo:
-            promotion_data.append({
-                "Date": promo_date,
-                "SKU_ID": sku_id,
-                "Promotion_Type": random.choice(["Discount", "BOGO", "Bundle"]),
-                "Discount_Percentage": round(random.uniform(0.05, 0.30), 2) if "Discount" in random.choice(["Discount", "BOGO", "Bundle"]) else None
-            })
-    return pd.DataFrame(promotion_data)
-
-def generate_external_factors_data(start_date, end_date):
-    dates = pd.date_range(start=start_date, end=end_date, freq='D')
-    external_factors = []
-    for date in dates:
-        external_factors.append({
-            "Date": date,
-            "Economic_Index": round(random.uniform(90, 110), 2),
-            "Holiday_Flag": 1 if date.month in [11, 12] and date.day in range(20, 32) else 0,
-            "Temperature_Celsius": round(random.uniform(5, 35), 1),
-            "Competitor_Activity_Index": round(random.uniform(0.5, 1.5), 2)
-        })
-    return pd.DataFrame(external_factors)
-
-def generate_lead_times_data(skus, max_lead_time_days=30):
-    lead_times = []
-    for sku_id in skus:
-        lead_times.append({
-            "Item_ID": sku_id,
-            "Item_Type": "Finished_Good",
-            "Supplier_ID": f"SUP_{random.randint(1, 3)}",
-            "Lead_Time_Days": random.randint(5, max_lead_time_days),
-            "Shelf_Life_Days": random.choice([None, random.randint(90, 365)]),
-            "Min_Order_Quantity": random.choice([10, 50, 100]),
-            "Order_Multiple": random.choice([10, 20, 50])
-        })
-    return pd.DataFrame(lead_times)
-
-def generate_bom_data(skus, num_components_per_sku, lead_times_df_ref):
-    bom_data = []
-    component_id_counter = 1000
-    for sku_id in skus:
-        num_components = random.randint(1, num_components_per_sku)
-        for _ in range(num_components):
-            component_id = f"COMP_{component_id_counter:04d}"
-            component_id_counter += 1
-            bom_data.append({
-                "Parent_SKU_ID": sku_id,
-                "Component_ID": component_id,
-                "Quantity_Required": random.randint(1, 5),
-                "Component_Type": random.choice(["Raw_Material", "Sub_Assembly"]),
-                "Shelf_Life_Days": random.choice([None, random.randint(30, 180), random.randint(7, 20)])
-            })
-            if component_id not in lead_times_df_ref['Item_ID'].values:
-                lead_times_df_ref.loc[len(lead_times_df_ref)] = {
-                    "Item_ID": component_id,
-                    "Item_Type": "Component",
-                    "Supplier_ID": f"SUP_{random.randint(1, 5)}",
-                    "Lead_Time_Days": random.randint(2, 15),
-                    "Shelf_Life_Days": random.choice([None, random.randint(30, 180)]),
-                    "Min_Order_Quantity": random.choice([100, 200, 500]),
-                    "Order_Multiple": random.choice([50, 100])
-                }
-    return pd.DataFrame(bom_data)
-
-# --- Core Logic Functions (with Streamlit caching) ---
-@st.cache_data
-def prepare_data_for_forecasting(sales_df, inventory_df, promotions_df, external_factors_df):
+def generate_inventory_data(sku_ids, start_date, end_date):
     """
-    Merges all relevant dataframes and creates features for the ML model.
-    This version uses vectorized operations for efficiency.
+    Generates dummy inventory data with a realistic trend.
     """
-    try:
-        merged_df = pd.merge(sales_df, inventory_df, on=['Date', 'SKU_ID'], how='left')
-        merged_df = pd.merge(merged_df, promotions_df, on=['Date', 'SKU_ID'], how='left')
-        merged_df['Promotion_Active'] = merged_df['Promotion_Type'].notna().astype(int)
-        merged_df['Discount_Percentage'] = merged_df['Discount_Percentage'].fillna(0)
-        promo_type_dummies = pd.get_dummies(merged_df['Promotion_Type'], prefix='Promo_Type', dummy_na=False)
-        merged_df = pd.concat([merged_df.drop(columns=['Promotion_Type']), promo_type_dummies], axis=1)
-        merged_df = pd.merge(merged_df, external_factors_df, on='Date', how='left')
-        merged_df['Date'] = pd.to_datetime(merged_df['Date'])
-        merged_df = merged_df.sort_values(by=['SKU_ID', 'Date']).reset_index(drop=True)
-        merged_df['Year'] = merged_df['Date'].dt.year
-        merged_df['Month'] = merged_df['Date'].dt.month
-        merged_df['Day'] = merged_df['Date'].dt.day
-        merged_df['DayOfWeek'] = merged_df['Date'].dt.dayofweek
-        merged_df['DayOfYear'] = merged_df['Date'].dt.dayofyear
-        merged_df['WeekOfYear'] = merged_df['Date'].dt.isocalendar().week.astype(int)
-        merged_df['Sales_Quantity_Lag_1'] = merged_df.groupby('SKU_ID')['Sales_Quantity'].shift(1).fillna(0)
-        merged_df['Sales_Quantity_Lag_7'] = merged_df.groupby('SKU_ID')['Sales_Quantity'].shift(7).fillna(0)
-        merged_df = merged_df.drop(columns=['Price', 'Customer_Segment'], errors='ignore')
-        merged_df = merged_df.fillna(0)
-        return merged_df
-    except Exception as e:
-        st.error(f"Error during data preparation: {e}")
-        return pd.DataFrame()
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    all_data = []
 
-@st.cache_resource
-def train_forecast_model(data_df, model_type='XGBoost'):
-    trained_models = {}
-    evaluation_metrics = {}
-    unique_skus = data_df['SKU_ID'].unique()
-    for sku_id in unique_skus:
-        sku_data = data_df[data_df['SKU_ID'] == sku_id].copy()
-        if len(sku_data) < 10:
-            st.warning(f"Not enough data to train for {sku_id}. Skipping.")
-            continue
-        features = [col for col in sku_data.columns if col not in ['SKU_ID', 'Sales_Quantity', 'Date']]
-        X = sku_data[features]
-        y = sku_data['Sales_Quantity']
-        split_point = int(len(sku_data) * 0.8)
-        X_train, X_test = X.iloc[:split_point], X.iloc[split_point:]
-        y_train, y_test = y.iloc[:split_point], y.iloc[split_point:]
-        if len(X_train) == 0 or len(X_test) == 0:
-            st.warning(f"Insufficient data for train/test split for {sku_id}. Skipping.")
-            continue
-        try:
-            if model_type == 'RandomForest':
-                model = RandomForestRegressor(n_estimators=100, random_state=42)
-            else:
-                model = XGBRegressor(objective='reg:squarederror', n_estimators=100, random_state=42)
-            model.fit(X_train, y_train)
-            trained_models[sku_id] = model
-            y_pred = model.predict(X_test)
-            mae = mean_absolute_error(y_test, y_pred)
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            evaluation_metrics[sku_id] = {"MAE": mae, "RMSE": rmse}
-        except Exception as e:
-            st.error(f"Error training model for {sku_id}: {e}")
-    return trained_models, evaluation_metrics
-
-@st.cache_data
-def predict_demand(trained_models, processed_data, forecast_horizon_days, external_factors_df):
-    forecasts = {}
-    current_date = processed_data['Date'].max()
-    future_dates = pd.date_range(start=current_date + timedelta(days=1), periods=forecast_horizon_days, freq='D')
-    
-    future_data_list = []
-    
-    for sku_id in trained_models.keys():
-        last_sku_row = processed_data[processed_data['SKU_ID'] == sku_id].sort_values(by='Date', ascending=False).iloc[0]
-        last_sales_quantity = last_sku_row['Sales_Quantity']
-        last_sales_quantity_lag_7 = last_sku_row['Sales_Quantity_Lag_7']
-
-        for i, forecast_date in enumerate(future_dates):
-            future_row_dict = {
-                'Date': forecast_date,
+    for sku_id in sku_ids:
+        for date in date_range:
+            # Simulate inventory levels with some fluctuation
+            inventory_level = max(0, 1000 + random.randint(-200, 200))
+            all_data.append({
+                'Date': date,
                 'SKU_ID': sku_id,
-                'Current_Stock': last_sku_row['Current_Stock'],
-                'Promotion_Active': 0,
-                'Discount_Percentage': 0,
-                'Year': forecast_date.year,
-                'Month': forecast_date.month,
-                'Day': forecast_date.day,
-                'DayOfWeek': forecast_date.dayofweek,
-                'DayOfYear': forecast_date.dayofyear,
-                'WeekOfYear': forecast_date.isocalendar().week,
-                'Sales_Quantity_Lag_1': last_sales_quantity,
-                'Sales_Quantity_Lag_7': last_sales_quantity_lag_7
-            }
-            last_sales_quantity_lag_7 = last_sku_row['Sales_Quantity_Lag_1']
-            last_sales_quantity = 0 
-            future_data_list.append(future_row_dict)
+                'Inventory_Level': inventory_level
+            })
+    return pd.DataFrame(all_data)
 
-    if not future_data_list:
-        st.warning("No future data to forecast.")
-        return {}
 
-    future_df = pd.DataFrame(future_data_list)
-    future_df = pd.merge(future_df, external_factors_df, on='Date', how='left')
-    future_df = future_df.fillna(0)
+def generate_sales_data(sku_ids, start_date, end_date, sales_channels, promotion_frequency):
+    """
+    Generates dummy sales data with seasonal, trend, and promotional effects.
+    """
+    date_range = pd.date_range(start=start_date, end=end_date, freq='D')
+    all_data = []
 
-    all_forecasts_df = pd.DataFrame()
+    for sku_id in sku_ids:
+        # Base sales trend
+        base_sales = np.linspace(10, 50, len(date_range))
+        noise = np.random.normal(0, 5, len(date_range))
 
-    for sku_id, model in trained_models.items():
-        sku_future_df = future_df[future_df['SKU_ID'] == sku_id].copy()
-        features = model.feature_names_in_ if hasattr(model, 'feature_names_in_') else [col for col in sku_future_df.columns if col not in ['SKU_ID', 'Date']]
-        
-        missing_features = [f for f in features if f not in sku_future_df.columns]
-        if missing_features:
-            st.warning(f"Warning: Missing features for {sku_id}: {missing_features}. Skipping.")
-            continue
-            
-        X_future = sku_future_df[features]
-        predictions = model.predict(X_future)
-        sku_future_df['Forecasted_Quantity'] = [max(0, int(q)) for q in predictions]
-        
-        for i in range(1, len(sku_future_df)):
-            sku_future_df.loc[sku_future_df.index[i], 'Sales_Quantity_Lag_1'] = sku_future_df.loc[sku_future_df.index[i-1], 'Forecasted_Quantity']
-            sku_future_df.loc[sku_future_df.index[i], 'Sales_Quantity_Lag_7'] = sku_future_df.loc[sku_future_df.index[i-1], 'Sales_Quantity_Lag_7']
-        
-        forecasts[sku_id] = sku_future_df[['Date', 'SKU_ID', 'Forecasted_Quantity']]
+        # Add seasonality (weekly and yearly)
+        weekly_seasonality = 5 * np.sin(2 * np.pi * date_range.dayofweek / 7)
+        yearly_seasonality = 10 * np.sin(2 * np.pi * date_range.dayofyear / 365.25)
 
-    return forecasts
+        # Add promotion effects
+        promotion_dates = pd.date_range(start=start_date, end=end_date, freq=f'{promotion_frequency}D')
+        promotion_effect = pd.Series(0, index=date_range)
+        for p_date in promotion_dates:
+            promotion_effect.loc[p_date:p_date + timedelta(days=2)] = 20
 
-@st.cache_data
-def calculate_auto_indent(forecasts, inventory_df, lead_times_df, evaluation_metrics, service_level, holding_cost_per_unit_per_day):
-    indent_recommendations = []
-    current_date = datetime.now()
-    Z_SCORE = norm.ppf(service_level)
+        sales = base_sales + noise + weekly_seasonality + yearly_seasonality + promotion_effect
+
+        for i, date in enumerate(date_range):
+            channel = random.choice(sales_channels)
+            units_sold = max(1, int(sales[i] + np.random.randint(-5, 5)))
+            all_data.append({
+                'Date': date,
+                'SKU_ID': sku_id,
+                'Sales_Channel': channel,
+                'Units_Sold': units_sold
+            })
+
+    return pd.DataFrame(all_data)
+
+
+def generate_sku_metadata(sku_ids, max_lead_time_days, max_sku_shelf_life_days):
+    """
+    Generates dummy SKU metadata like lead time and shelf life.
+    """
+    all_data = []
+    for sku_id in sku_ids:
+        lead_time = random.randint(1, max_lead_time_days)
+        shelf_life = random.randint(30, max_sku_shelf_life_days)
+        all_data.append({
+            'SKU_ID': sku_id,
+            'Lead_Time_Days': lead_time,
+            'Shelf_Life_Days': shelf_life
+        })
+    return pd.DataFrame(all_data)
+
+
+def generate_component_bom(sku_ids, num_components):
+    """
+    Generates a dummy Bill of Materials (BOM) for SKUs.
+    """
+    all_data = []
+    component_ids = [f'COMP_{i+1}' for i in range(num_components * len(sku_ids))]
+    for sku_id in sku_ids:
+        for i in range(random.randint(1, num_components)):
+            component_id = random.choice(component_ids)
+            all_data.append({
+                'SKU_ID': sku_id,
+                'Component_ID': component_id,
+                'Quantity': random.randint(1, 5)
+            })
+    return pd.DataFrame(all_data)
+
+
+def generate_global_config(default_holding_cost, default_ordering_cost):
+    """
+    Generates dummy global configuration data.
+    """
+    return pd.DataFrame([{
+        'Holding_Cost_Per_Unit_Per_Day': default_holding_cost,
+        'Ordering_Cost_Per_Order': default_ordering_cost
+    }])
+
+
+def generate_dummy_data():
+    """
+    Generates a set of dummy dataframes for a full sample run.
+    """
+    st.info("Generating sample data...")
+    # Define SKUs
+    sku_ids = [f'SKU_{i+1}' for i in range(DEFAULT_NUM_SKUS)]
+
+    # Generate dataframes
+    sales_df = generate_sales_data(sku_ids, DEFAULT_START_DATE, DEFAULT_END_DATE, DEFAULT_SALES_CHANNELS, DEFAULT_PROMOTION_FREQUENCY_DAYS)
+    sku_metadata_df = generate_sku_metadata(sku_ids, DEFAULT_MAX_LEAD_TIME_DAYS, DEFAULT_MAX_SKU_SHELF_LIFE_DAYS)
+    inventory_df = generate_inventory_data(sku_ids, DEFAULT_START_DATE, DEFAULT_END_DATE)
+    component_bom_df = generate_component_bom(sku_ids, DEFAULT_NUM_COMPONENTS_PER_SKU)
+    global_config_df = generate_global_config(DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY, DEFAULT_ORDERING_COST_PER_ORDER)
+
+    st.success("Sample data generated successfully!")
+    return sales_df, sku_metadata_df, inventory_df, component_bom_df, global_config_df
+
+
+# --- Core Forecasting and Inventory Logic ---
+def create_features(df):
+    """
+    Creates time-series features for forecasting models.
+    """
+    df['Year'] = df.index.year
+    df['Month'] = df.index.month
+    df['Week'] = df.index.isocalendar().week.astype(int)
+    df['Day'] = df.index.day
+    df['DayOfWeek'] = df.index.dayofweek
+    df['DayOfYear'] = df.index.dayofyear
+    df['IsMonthEnd'] = df.index.is_month_end.astype(int)
+    df['IsQuarterEnd'] = df.index.is_quarter_end.astype(int)
+    df['IsYearEnd'] = df.index.is_year_end.astype(int)
+    return df
+
+
+def forecast_demand_ml(data, forecast_horizon=90, model_type='XGBoost'):
+    """
+    Forecasts demand using a machine learning model (XGBoost or Random Forest).
+    """
+    # Assuming 'data' is a DataFrame with a datetime index and 'Units_Sold' column
+    df = data.copy()
+    df = create_features(df)
     
-    for sku_id, forecast_df in forecasts.items():
-        latest_inventory_row = inventory_df[inventory_df['SKU_ID'] == sku_id].sort_values(by='Date', ascending=False).iloc[0]
-        current_stock = latest_inventory_row['Current_Stock']
+    # Check for sufficient data
+    if len(df) < 2:
+        st.warning(f"Not enough data to train the model for SKU: {df.name}. Skipping forecast.")
+        return pd.DataFrame()
 
-        sku_lead_time_row = lead_times_df[(lead_times_df['Item_ID'] == sku_id) & (lead_times_df['Item_Type'] == 'Finished_Good')]
-        if sku_lead_time_row.empty:
-            st.warning(f"Warning: Lead time or details not found for SKU {sku_id}. Skipping auto-indent.")
-            continue
-        
-        lead_time_days = sku_lead_time_row['Lead_Time_Days'].iloc[0]
-        sku_shelf_life = sku_lead_time_row['Shelf_Life_Days'].iloc[0]
-        min_order_quantity = sku_lead_time_row['Min_Order_Quantity'].iloc[0]
-        order_multiple = sku_lead_time_row['Order_Multiple'].iloc[0]
+    train_data = df[:-forecast_horizon]
+    test_data = df[-forecast_horizon:]
 
-        forecast_error_std = evaluation_metrics.get(sku_id, {}).get("RMSE", 0)
+    features = ['Year', 'Month', 'Day', 'DayOfWeek', 'DayOfYear', 'IsMonthEnd', 'IsQuarterEnd', 'IsYearEnd']
+    target = 'Units_Sold'
+
+    if train_data.empty:
+        st.warning(f"Training data is empty for SKU: {df.name}. Skipping forecast.")
+        return pd.DataFrame()
+
+    X_train = train_data[features]
+    y_train = train_data[target]
+    
+    if model_type == 'XGBoost':
+        model = XGBRegressor(n_estimators=100, learning_rate=0.1, random_state=42)
+    else:  # 'Random Forest'
+        model = RandomForestRegressor(n_estimators=100, random_state=42)
+    
+    model.fit(X_train, y_train)
+
+    # Generate future dates for forecasting
+    future_dates = pd.date_range(start=df.index[-1] + timedelta(days=1), periods=forecast_horizon, freq='D')
+    future_df = pd.DataFrame(index=future_dates)
+    future_df = create_features(future_df)
+    X_future = future_df[features]
+
+    forecast_values = model.predict(X_future)
+    forecast_df = pd.DataFrame({'Date': future_dates, 'Forecasted_Demand': np.maximum(0, forecast_values)})
+    
+    return forecast_df
+
+
+def forecast_demand_moving_average(data, forecast_horizon=90, window=30):
+    """
+    Forecasts demand using a simple moving average model.
+    """
+    df = data.copy()
+    if len(df) < window:
+        st.warning(f"Not enough data for a {window}-day moving average for SKU: {df.name}. Skipping forecast.")
+        return pd.DataFrame()
+
+    # Calculate the moving average of the last `window` days
+    last_known_avg = df['Units_Sold'].rolling(window=window).mean().iloc[-1]
+
+    # Generate future dates and use the last moving average as the forecast
+    future_dates = pd.date_range(start=df.index[-1] + timedelta(days=1), periods=forecast_horizon, freq='D')
+    forecast_values = np.full(forecast_horizon, last_known_avg)
+    
+    forecast_df = pd.DataFrame({'Date': future_dates, 'Forecasted_Demand': np.maximum(0, forecast_values)})
+    
+    return forecast_df
+
+
+def forecast_demand(sales_df, selected_sku, model_type, forecast_horizon):
+    """
+    Selects and runs the appropriate forecasting model.
+    """
+    st.info(f"Forecasting demand for SKU: {selected_sku} using {model_type}...")
+    
+    sku_sales_df = sales_df[sales_df['SKU_ID'] == selected_sku]
+    
+    if sku_sales_df.empty:
+        st.warning(f"No sales data found for SKU: {selected_sku}. Cannot forecast.")
+        return pd.DataFrame()
+    
+    # Resample to get daily total sales
+    sku_sales_daily = sku_sales_df.groupby('Date').agg({'Units_Sold': 'sum'})
+    sku_sales_daily.name = selected_sku # Attach SKU name for better logging
+    
+    if model_type == 'XGBoost':
+        forecast_df = forecast_demand_ml(sku_sales_daily, forecast_horizon, 'XGBoost')
+    elif model_type == 'Random Forest':
+        forecast_df = forecast_demand_ml(sku_sales_daily, forecast_horizon, 'Random Forest')
+    elif model_type == 'Moving Average':
+        # You can adjust the moving average window here
+        forecast_df = forecast_demand_moving_average(sku_sales_daily, forecast_horizon, window=30)
+    else:
+        st.warning(f"Unknown model type: {model_type}. Falling back to XGBoost.")
+        forecast_df = forecast_demand_ml(sku_sales_daily, forecast_horizon, 'XGBoost')
+
+    if not forecast_df.empty:
+        st.success(f"Demand forecast for {selected_sku} completed.")
+        return forecast_df
+    else:
+        st.error(f"Demand forecast for {selected_sku} failed.")
+        return pd.DataFrame()
+
+
+def calculate_safety_stock(forecast_df, lead_time_days, service_level=0.95):
+    """
+    Calculates safety stock based on forecast variability and lead time.
+    """
+    if forecast_df.empty:
+        return 0
+
+    # Calculate the standard deviation of forecast errors (using a simple proxy here)
+    # In a real-world scenario, you would use actual forecast errors.
+    # Here, we'll use the standard deviation of the last 30 days of the forecast as a proxy for variability.
+    if len(forecast_df['Forecasted_Demand']) > 30:
+        demand_std_dev = forecast_df['Forecasted_Demand'].tail(30).std()
+    else:
+        demand_std_dev = forecast_df['Forecasted_Demand'].std()
+    
+    # Handle case where demand_std_dev is NaN (e.g., if forecast is a single value)
+    if pd.isna(demand_std_dev):
+        demand_std_dev = 0
+    
+    # Calculate Z-score for the desired service level
+    z_score = norm.ppf(service_level)
+    
+    # Safety stock formula
+    safety_stock = z_score * demand_std_dev * math.sqrt(lead_time_days)
+    
+    return max(0, math.ceil(safety_stock))
+
+
+def calculate_reorder_point(avg_daily_demand, lead_time_days, safety_stock):
+    """
+    Calculates the reorder point.
+    """
+    return math.ceil((avg_daily_demand * lead_time_days) + safety_stock)
+
+
+def calculate_optimal_order_quantity_eoq(holding_cost, ordering_cost, annual_demand):
+    """
+    Calculates optimal order quantity using the Economic Order Quantity (EOQ) model.
+    """
+    if annual_demand <= 0:
+        return 0
+    # The formula uses annual holding cost, so we multiply the daily cost by 365
+    annual_holding_cost = holding_cost * 365
+    if annual_holding_cost <= 0:
+        return 0
+    eoq = math.sqrt((2 * annual_demand * ordering_cost) / annual_holding_cost)
+    return math.ceil(eoq)
+
+
+def calculate_kpis(sales_df, inventory_df, forecast_df, sku_metadata_df, global_config_df, start_date, end_date):
+    """
+    Calculates key performance indicators for all SKUs.
+    """
+    st.info("Calculating KPIs for all SKUs...")
+    all_kpis = []
+    
+    unique_skus = sales_df['SKU_ID'].unique()
+    
+    # Extract global costs
+    holding_cost = global_config_df['Holding_Cost_Per_Unit_Per_Day'].iloc[0]
+    ordering_cost = global_config_df['Ordering_Cost_Per_Order'].iloc[0]
+    
+    for sku_id in unique_skus:
+        # Filter data for the current SKU
+        sku_sales = sales_df[sales_df['SKU_ID'] == sku_id]
+        sku_inventory = inventory_df[inventory_df['SKU_ID'] == sku_id]
+        sku_metadata = sku_metadata_df[sku_metadata_df['SKU_ID'] == sku_id]
         
-        if forecast_error_std > 0 and lead_time_days > 0:
-            safety_stock = int(Z_SCORE * forecast_error_std * np.sqrt(lead_time_days))
+        # Calculate demand and inventory related metrics
+        total_demand = sku_sales['Units_Sold'].sum()
+        total_days = (end_date - start_date).days + 1
+        avg_daily_demand = total_demand / total_days if total_days > 0 else 0
+        
+        # Calculate stockout rates (simplified)
+        # This is a simplification. A real stockout rate calculation would require
+        # a comparison of demand vs. available inventory on a daily basis.
+        # We assume a stockout if inventory is zero.
+        stockout_days = len(sku_inventory[sku_inventory['Inventory_Level'] == 0])
+        stockout_rate = (stockout_days / total_days) * 100 if total_days > 0 else 0
+        
+        # Calculate cost metrics
+        total_holding_cost = (sku_inventory['Inventory_Level'] * holding_cost).sum()
+        # This is a simplification, assumes a constant ordering frequency.
+        # A more complex model would track actual orders.
+        num_orders = total_demand / 100 # Assume an average order size of 100
+        total_ordering_cost = num_orders * ordering_cost
+        total_inventory_cost = total_holding_cost + total_ordering_cost
+        
+        # Get lead time for safety stock calculation
+        lead_time_days = sku_metadata['Lead_Time_Days'].iloc[0] if not sku_metadata.empty else DEFAULT_MAX_LEAD_TIME_DAYS
+        
+        # Safety stock and reorder point calculation
+        if not forecast_df.empty:
+            safety_stock = calculate_safety_stock(forecast_df[forecast_df['SKU_ID'] == sku_id], lead_time_days)
+            reorder_point = calculate_reorder_point(avg_daily_demand, lead_time_days, safety_stock)
+            eoq = calculate_optimal_order_quantity_eoq(holding_cost, ordering_cost, total_demand)
         else:
-            safety_stock = int(forecast_df.head(lead_time_days)['Forecasted_Quantity'].sum() * 0.1)
-        
-        capped_safety_stock = safety_stock
-        if sku_shelf_life is not None:
-            shelf_life_demand = forecast_df.head(int(sku_shelf_life))['Forecasted_Quantity'].sum()
-            capped_safety_stock = min(safety_stock, int(shelf_life_demand * 0.2))
-
-        forecast_during_lead_time = forecast_df.head(lead_time_days)['Forecasted_Quantity'].sum()
-        reorder_point_days = 7 # Fixed for simplicity in this Streamlit example
-        reorder_point_demand_buffer = forecast_df.head(reorder_point_days)['Forecasted_Quantity'].sum()
-
-        target_stock_level = int(forecast_during_lead_time + capped_safety_stock)
-        reorder_point = int(reorder_point_demand_buffer + capped_safety_stock)
-
-        order_quantity = 0
-        if current_stock < reorder_point:
-            order_quantity = max(0, target_stock_level - current_stock)
-            if order_quantity < min_order_quantity:
-                order_quantity = min_order_quantity
-            order_quantity = int(np.ceil(order_quantity / order_multiple)) * order_multiple
-
-        estimated_holding_cost_30_days = target_stock_level * holding_cost_per_unit_per_day * 30
-        estimated_ordering_cost = st.session_state.ORDERING_COST_PER_ORDER if order_quantity > 0 else 0
-
-        indent_recommendations.append({
-            "SKU_ID": sku_id,
-            "Current_Stock": current_stock,
-            "Forecasted_Demand_Lead_Time": forecast_during_lead_time,
-            "Lead_Time_Days": lead_time_days,
-            "SKU_Shelf_Life_Days": sku_shelf_life,
-            "Calculated_Safety_Stock": safety_stock,
-            "Capped_Safety_Stock": capped_safety_stock,
-            "Target_Stock_Level": target_stock_level,
-            "Reorder_Point": reorder_point,
-            "Order_Quantity": order_quantity,
-            "Min_Order_Quantity": min_order_quantity,
-            "Order_Multiple": order_multiple,
-            "Estimated_Holding_Cost_30_Days": estimated_holding_cost_30_days,
-            "Estimated_Ordering_Cost": estimated_ordering_cost,
-            "Recommendation_Date": current_date.strftime("%Y-%m-%d %H:%M:%S")
+            safety_stock = 0
+            reorder_point = 0
+            eoq = 0
+            
+        all_kpis.append({
+            'SKU_ID': sku_id,
+            'Avg_Daily_Demand': avg_daily_demand,
+            'Total_Demand': total_demand,
+            'Stockout_Rate': stockout_rate,
+            'Total_Holding_Cost': total_holding_cost,
+            'Total_Ordering_Cost': total_ordering_cost,
+            'Total_Inventory_Cost': total_inventory_cost,
+            'Safety_Stock': safety_stock,
+            'Reorder_Point': reorder_point,
+            'Optimal_Order_Quantity_EOQ': eoq
         })
         
-    return pd.DataFrame(indent_recommendations)
+    st.success("KPI calculation completed.")
+    return pd.DataFrame(all_kpis)
 
-@st.cache_data
-def calculate_bom_requirements(sku_indent_recommendations_df, bom_df, lead_times_df):
-    component_requirements = {}
-    current_date = datetime.now()
 
-    if sku_indent_recommendations_df.empty:
+def aggregate_kpi_for_plot(df, selected_sku, kpi_name, roll_up_choice, aggregation_method='sum'):
+    """
+    Aggregates KPI data for plotting based on user's roll-up choice.
+    """
+    if df.empty or 'Date' not in df.columns:
+        st.info("Input DataFrame is empty or does not have a 'Date' column.")
         return pd.DataFrame()
-
-    for _, row in sku_indent_recommendations_df.iterrows():
-        sku_id = row['SKU_ID']
-        sku_order_quantity = row['Order_Quantity']
-
-        if sku_order_quantity > 0:
-            components_for_sku = bom_df[bom_df['Parent_SKU_ID'] == sku_id]
-
-            for _, comp_row in components_for_sku.iterrows():
-                component_id = comp_row['Component_ID']
-                qty_required_per_sku = comp_row['Quantity_Required']
-                component_type = comp_row['Component_Type']
-                shelf_life_days = comp_row['Shelf_Life_Days']
-
-                total_component_qty = sku_order_quantity * qty_required_per_sku
-
-                comp_lead_time_row = lead_times_df[(lead_times_df['Item_ID'] == component_id) & (lead_times_df['Item_Type'] == component_type)]
-                if comp_lead_time_row.empty:
-                    continue
-                
-                component_lead_time = comp_lead_time_row['Lead_Time_Days'].iloc[0]
-                min_order_quantity = comp_lead_time_row['Min_Order_Quantity'].iloc[0]
-                order_multiple = comp_lead_time_row['Order_Multiple'].iloc[0]
-
-                adjusted_qty = total_component_qty
-                if adjusted_qty < min_order_quantity:
-                    adjusted_qty = min_order_quantity
-                adjusted_qty = int(np.ceil(adjusted_qty / order_multiple)) * order_multiple
-                
-                shelf_life_critical_flag = False
-                if shelf_life_days is not None and component_lead_time > shelf_life_days:
-                    shelf_life_critical_flag = True
-
-                earliest_order_date = (current_date + timedelta(days=row['Lead_Time_Days']) - timedelta(days=component_lead_time)).strftime("%Y-%m-%d")
-                estimated_ordering_cost = st.session_state.ORDERING_COST_PER_ORDER
-
-                if component_id not in component_requirements:
-                    component_requirements[component_id] = {
-                        "Component_ID": component_id,
-                        "Total_Required_Quantity": 0,
-                        "Component_Type": component_type,
-                        "Lead_Time_Days": component_lead_time,
-                        "Shelf_Life_Days": shelf_life_days,
-                        "Shelf_Life_Critical": shelf_life_critical_flag,
-                        "Min_Order_Quantity": min_order_quantity,
-                        "Order_Multiple": order_multiple,
-                        "Earliest_Order_Placement_Date": earliest_order_date,
-                        "Estimated_Ordering_Cost": 0,
-                        "Source_SKUs": []
-                    }
-                component_requirements[component_id]["Total_Required_Quantity"] += adjusted_qty
-                component_requirements[component_id]["Estimated_Ordering_Cost"] += estimated_ordering_cost
-                component_requirements[component_id]["Source_SKUs"].append(f"{sku_id} ({sku_order_quantity})")
     
-    if not component_requirements:
+    plot_df = df[df['SKU_ID'] == selected_sku].copy()
+    
+    if plot_df.empty:
         return pd.DataFrame()
-        
-    bom_indent_df = pd.DataFrame(list(component_requirements.values()))
-    bom_indent_df['Source_SKUs'] = bom_indent_df['Source_SKUs'].apply(lambda x: ", ".join(x))
-    return bom_indent_df
+    
+    plot_df['Date'] = pd.to_datetime(plot_df['Date'])
+    plot_df.set_index('Date', inplace=True)
+    
+    # Assuming the KPI is already a column in the DataFrame
+    plot_df['Value'] = plot_df[kpi_name]
+    
+    if roll_up_choice == 'Daily':
+        # The data is already daily, just return it
+        return plot_df.reset_index()
+    elif roll_up_choice == 'Weekly':
+        if aggregation_method == 'mean':
+            return plot_df.resample('W').mean().reset_index()
+        else:
+            return plot_df.resample('W').sum().reset_index()
+    elif roll_up_choice == 'Monthly':
+        if aggregation_method == 'mean':
+            return plot_df.resample('M').mean().reset_index()
+        else:
+            return plot_df.resample('M').sum().reset_index()
+    else:
+        return plot_df.reset_index()
+    
 
 # --- Streamlit UI ---
-st.set_page_config(layout="wide")
-st.title("Quantumflo: Demand Forecasting & Auto-Indent Solution")
-st.markdown("A data-driven solution for supply chain planning using ML.")
+st.set_page_config(layout="wide", page_title="QuantumFlo Demand and Inventory Intelligence", page_icon=":bar_chart:")
+st.title(":bar_chart: QuantumFlo Demand and Inventory Intelligence")
 
-# Sidebar for controls
-st.sidebar.header("Application Settings")
-run_on_sample_data = st.sidebar.button("🚀 Run Forecast on Sample Data")
-run_on_uploaded_data = st.sidebar.button("🚀 Run Forecast on Uploaded Data")
+# Initialize session state variables if they don't exist
+if 'sales_df' not in st.session_state:
+    st.session_state.sales_df = pd.DataFrame()
+if 'sku_metadata_df' not in st.session_state:
+    st.session_state.sku_metadata_df = pd.DataFrame()
+if 'inventory_df' not in st.session_state:
+    st.session_state.inventory_df = pd.DataFrame()
+if 'component_bom_df' not in st.session_state:
+    st.session_state.component_bom_df = pd.DataFrame()
+if 'global_config_df' not in st.session_state:
+    st.session_state.global_config_df = pd.DataFrame()
+if 'forecast_results' not in st.session_state:
+    st.session_state.forecast_results = pd.DataFrame()
+if 'all_kpis_df' not in st.session_state:
+    st.session_state.all_kpis_df = pd.DataFrame()
+if 'all_stockout_rates_df' not in st.session_state:
+    st.session_state.all_stockout_rates_df = pd.DataFrame()
 
-st.sidebar.subheader("Configuration")
-st.session_state.FORECAST_HORIZON_DAYS = st.sidebar.slider("Forecast Horizon (Days)", min_value=7, max_value=180, value=30)
-st.session_state.SERVICE_LEVEL = st.sidebar.slider("Service Level", min_value=0.5, max_value=0.999, value=0.95, step=0.01)
-model_to_use = st.sidebar.selectbox("Select ML Model", ('XGBoost', 'RandomForest'), index=0)
+# --- Sidebar for Data Upload and Configuration ---
+with st.sidebar:
+    st.header("Data Configuration")
+    data_source_choice = st.radio("Choose Data Source", ("Upload Your Own", "Run on Sample Data"))
 
-# File uploader section
-st.sidebar.subheader("Upload Your Data (CSV)")
-uploaded_files = {}
-uploaded_files['sales_data'] = st.sidebar.file_uploader("Upload sales_data.csv", type="csv")
-uploaded_files['inventory_data'] = st.sidebar.file_uploader("Upload inventory_data.csv", type="csv")
-uploaded_files['promotions_data'] = st.sidebar.file_uploader("Upload promotions_data.csv", type="csv")
-uploaded_files['external_factors_data'] = st.sidebar.file_uploader("Upload external_factors_data.csv", type="csv")
-uploaded_files['lead_times_data'] = st.sidebar.file_uploader("Upload lead_times_data.csv", type="csv")
-uploaded_files['bom_data'] = st.sidebar.file_uploader("Upload bom_data.csv", type="csv")
+    if data_source_choice == "Upload Your Own":
+        st.info("Upload CSV files for your data.")
+        uploaded_sales_file = st.file_uploader("Upload Sales Data (CSV)", type="csv")
+        uploaded_sku_metadata_file = st.file_uploader("Upload SKU Metadata (CSV)", type="csv")
+        uploaded_inventory_file = st.file_uploader("Upload Inventory Data (CSV)", type="csv")
+        uploaded_bom_file = st.file_uploader("Upload Component BOM (CSV)", type="csv")
+        uploaded_global_config_file = st.file_uploader("Upload Global Config (CSV)", type="csv")
 
-# Main execution logic
-if run_on_sample_data or run_on_uploaded_data:
-    st.info("Running the simulation. This may take a moment...")
+        if st.button("Load Uploaded Data"):
+            if uploaded_sales_file:
+                st.session_state.sales_df = pd.read_csv(uploaded_sales_file)
+            if uploaded_sku_metadata_file:
+                st.session_state.sku_metadata_df = pd.read_csv(uploaded_sku_metadata_file)
+            if uploaded_inventory_file:
+                st.session_state.inventory_df = pd.read_csv(uploaded_inventory_file)
+            if uploaded_bom_file:
+                st.session_state.component_bom_df = pd.read_csv(uploaded_bom_file)
+            if uploaded_global_config_file:
+                st.session_state.global_config_df = pd.read_csv(uploaded_global_config_file)
+            st.success("Data loaded successfully!")
+
+    if data_source_choice == "Run on Sample Data":
+        if st.button("Generate and Load Sample Data"):
+            (st.session_state.sales_df,
+             st.session_state.sku_metadata_df,
+             st.session_state.inventory_df,
+             st.session_state.component_bom_df,
+             st.session_state.global_config_df) = generate_dummy_data()
+
+# --- Main App Content ---
+if not st.session_state.sales_df.empty:
+    st.success("Data is available. You can now proceed with analysis and forecasting.")
+
+    # Get unique SKUs for selection
+    unique_skus = st.session_state.sales_df['SKU_ID'].unique()
+    selected_sku = st.selectbox("Select SKU for Analysis", unique_skus)
+
+    # --- Forecasting Section ---
+    st.header("Demand Forecasting")
     
-    # Load data
-    if run_on_sample_data:
-        sales_df = generate_sales_data(st.session_state.NUM_SKUS, st.session_state.START_DATE, st.session_state.END_DATE)
-        inventory_df = generate_inventory_data(sales_df, st.session_state.START_DATE)
-        promotions_df = generate_promotion_data(sales_df)
-        external_factors_df = generate_external_factors_data(st.session_state.START_DATE, st.session_state.END_DATE)
-        lead_times_df = generate_lead_times_data(sales_df['SKU_ID'].unique())
-        bom_df = generate_bom_data(sales_df['SKU_ID'].unique(), st.session_state.NUM_COMPONENTS_PER_SKU, lead_times_df)
-        
-        st.success("Using dummy data.")
-        st.subheader("Generated Sample Data (first 5 rows)")
-        st.dataframe(sales_df.head())
-    else: # Run on uploaded data
-        sales_df = load_data(uploaded_files.get('sales_data'), pd.DataFrame)
-        inventory_df = load_data(uploaded_files.get('inventory_data'), pd.DataFrame)
-        promotions_df = load_data(uploaded_files.get('promotions_data'), pd.DataFrame)
-        external_factors_df = load_data(uploaded_files.get('external_factors_data'), pd.DataFrame)
-        lead_times_df = load_data(uploaded_files.get('lead_times_data'), pd.DataFrame)
-        bom_df = load_data(uploaded_files.get('bom_data'), pd.DataFrame)
-        if sales_df.empty or inventory_df.empty or lead_times_df.empty or bom_df.empty:
-            st.error("Missing required data files. Please upload all files and try again.")
-            st.stop()
+    # Model selection without Prophet
+    model_choice = st.radio(
+        "Choose Forecasting Model",
+        ("XGBoost", "Random Forest", "Moving Average"),
+        index=0 # Default to XGBoost
+    )
+    forecast_horizon = st.slider("Forecast Horizon (in days)", 30, 365, 90)
 
-    # Process and forecast
-    with st.spinner("Processing data and training models..."):
-        processed_data_df = prepare_data_for_forecasting(sales_df, inventory_df, promotions_df, external_factors_df)
-        if not processed_data_df.empty:
-            trained_models, evaluation_metrics = train_forecast_model(processed_data_df, model_to_use)
-            if trained_models:
-                forecasted_demand_by_sku = predict_demand(trained_models, processed_data_df, st.session_state.FORECAST_HORIZON_DAYS, external_factors_df)
-                if forecasted_demand_by_sku:
-                    st.success("Forecasting complete!")
-                    st.subheader("Model Evaluation Metrics (RMSE and MAE)")
-                    st.json(evaluation_metrics)
-                    
-                    st.subheader("Future Demand Forecasts")
-                    all_forecasts_df = pd.concat(forecasted_demand_by_sku.values(), ignore_index=True)
-                    st.dataframe(all_forecasts_df)
-
-                    st.subheader("SKU-Level Auto-Indent Recommendations")
-                    sku_indent_recommendations_df = calculate_auto_indent(
-                        forecasted_demand_by_sku, 
-                        inventory_df, 
-                        lead_times_df, 
-                        evaluation_metrics, 
-                        st.session_state.SERVICE_LEVEL, 
-                        st.session_state.HOLDING_COST_PER_UNIT_PER_DAY
-                    )
-                    st.dataframe(sku_indent_recommendations_df)
-                    
-                    st.subheader("BOM-Level Component Requirements")
-                    bom_requirements_df = calculate_bom_requirements(sku_indent_recommendations_df, bom_df, lead_times_df)
-                    st.dataframe(bom_requirements_df)
-                else:
-                    st.error("Failed to generate demand forecasts.")
+    if st.button("Run Forecast"):
+        if selected_sku:
+            forecast_df = forecast_demand(st.session_state.sales_df, selected_sku, model_choice, forecast_horizon)
+            
+            if not forecast_df.empty:
+                st.session_state.forecast_results = forecast_df
+                
+                # Plotting the forecast
+                combined_df = st.session_state.sales_df[st.session_state.sales_df['SKU_ID'] == selected_sku]
+                combined_df = combined_df.groupby('Date')['Units_Sold'].sum().reset_index()
+                
+                fig = px.line(combined_df, x='Date', y='Units_Sold', title=f"Historical and Forecasted Demand for {selected_sku}")
+                
+                # Add the forecast line
+                fig.add_trace(go.Scatter(
+                    x=st.session_state.forecast_results['Date'],
+                    y=st.session_state.forecast_results['Forecasted_Demand'],
+                    mode='lines',
+                    name='Forecast',
+                    line=dict(color='red', dash='dot')
+                ))
+                
+                fig.update_layout(hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
             else:
-                st.error("No models were trained. Please check your data and try again.")
+                st.warning("Forecast could not be generated. Please check the data.")
         else:
-            st.error("Data processing failed.")
+            st.warning("Please select an SKU to run the forecast.")
 
-# --- Helper function for download links ---
-def get_table_download_link(df, filename, text):
-    csv = df.to_csv(index=False)
-    b64 = base64.b64encode(csv.encode()).decode()
-    href = f'<a href="data:file/csv;base64,{b64}" download="{filename}">{text}</a>'
-    return href
+    # --- KPI Analysis Section ---
+    st.header("Inventory KPIs and Optimization")
+    if st.button("Calculate KPIs"):
+        if (not st.session_state.sales_df.empty and 
+            not st.session_state.inventory_df.empty and 
+            not st.session_state.sku_metadata_df.empty and 
+            not st.session_state.global_config_df.empty):
+            
+            # Combine forecast with sales to get a full time series for stockout analysis
+            # This is a placeholder for a more robust stockout calculation
+            all_stockout_df = st.session_state.inventory_df.copy()
+            
+            # The calculation of stockout rate here is simplified.
+            # It should be a more complex simulation comparing daily demand vs. daily inventory
+            all_stockout_df['Date'] = pd.to_datetime(all_stockout_df['Date'])
+            all_stockout_df['Stockout_Rate'] = np.where(all_stockout_df['Inventory_Level'] <= 0, 100, 0)
+            
+            st.session_state.all_stockout_rates_df = all_stockout_df
+            st.session_state.all_kpis_df = calculate_kpis(
+                st.session_state.sales_df,
+                st.session_state.inventory_df,
+                st.session_state.forecast_results,
+                st.session_state.sku_metadata_df,
+                st.session_state.global_config_df,
+                DEFAULT_START_DATE,
+                DEFAULT_END_DATE
+            )
+            st.success("KPIs calculated and ready for review.")
+        else:
+            st.warning("Please load all data files before calculating KPIs.")
 
-st.sidebar.subheader("Download Sample Data Templates")
-st.sidebar.markdown("Click to download and populate with your own data.")
-if st.sidebar.button("Download Sample Data"):
-    dummy_sales_df = generate_sales_data(st.session_state.NUM_SKUS, st.session_state.START_DATE, st.session_state.END_DATE)
-    dummy_inventory_df = generate_inventory_data(dummy_sales_df, st.session_state.START_DATE)
-    dummy_promotions_df = generate_promotion_data(dummy_sales_df)
-    dummy_external_factors_df = generate_external_factors_data(st.session_state.START_DATE, st.session_state.END_DATE)
-    dummy_lead_times_df = generate_lead_times_data(dummy_sales_df['SKU_ID'].unique())
-    dummy_bom_df = generate_bom_data(dummy_sales_df['SKU_ID'].unique(), st.session_state.NUM_COMPONENTS_PER_SKU, dummy_lead_times_df)
+    if not st.session_state.all_kpis_df.empty:
+        st.subheader("Inventory KPIs Summary")
+        st.dataframe(st.session_state.all_kpis_df, use_container_width=True)
+        
+        # KPI Plotting
+        st.subheader(f"KPIs for {selected_sku}")
+        kpi_to_plot = st.selectbox(
+            "Select KPI to Plot",
+            ('Total_Demand', 'Stockout_Rate', 'Total_Inventory_Cost')
+        )
+        forecast_roll_up_choice = st.selectbox(
+            "Roll-up Period for Plot",
+            ('Daily', 'Weekly', 'Monthly'),
+            key='kpi_roll_up'
+        )
 
-    st.sidebar.markdown(get_table_download_link(dummy_sales_df, 'sales_data.csv', 'Download sales_data.csv'), unsafe_allow_html=True)
-    st.sidebar.markdown(get_table_download_link(dummy_inventory_df, 'inventory_data.csv', 'Download inventory_data.csv'), unsafe_allow_html=True)
-    st.sidebar.markdown(get_table_download_link(dummy_promotions_df, 'promotions_data.csv', 'Download promotions_data.csv'), unsafe_allow_html=True)
-    st.sidebar.markdown(get_table_download_link(dummy_external_factors_df, 'external_factors_data.csv', 'Download external_factors_data.csv'), unsafe_allow_html=True)
-    st.sidebar.markdown(get_table_download_link(dummy_lead_times_df, 'lead_times_data.csv', 'Download lead_times_data.csv'), unsafe_allow_html=True)
-    st.sidebar.markdown(get_table_download_link(dummy_bom_df, 'bom_data.csv', 'Download bom_data.csv'), unsafe_allow_html=True)
+        # Plotting Demand
+        st.subheader("Historical Demand over time")
+        if not st.session_state.sales_df.empty:
+            demand_plot_df = aggregate_kpi_for_plot(
+                st.session_state.sales_df, selected_sku, 'Units_Sold', forecast_roll_up_choice, 'sum'
+            )
+            if not demand_plot_df.empty:
+                fig_demand = px.line(
+                    demand_plot_df,
+                    x="Date",
+                    y="Value",
+                    title=f"Historical Demand for {selected_sku} (Roll-up: {forecast_roll_up_choice})",
+                    labels={"Value": "Units Sold", "Date": forecast_roll_up_choice},
+                    color_discrete_sequence=['blue']
+                )
+                fig_demand.update_layout(hovermode="x unified")
+                st.plotly_chart(fig_demand, use_container_width=True)
+            else:
+                st.info(f"No Demand data to plot for {selected_sku}.")
+        else:
+            st.info("No sales data available. Please upload your data or run on Sample Data.")
+
+        # Plotting Stockout Rate
+        st.subheader("Stockout Rate over time")
+        if not st.session_state.inventory_df.empty:
+            unique_skus_for_stockout_plot = st.session_state.inventory_df['SKU_ID'].unique()
+            if len(unique_skus_for_stockout_plot) > 0:
+                stockout_plot_df = aggregate_kpi_for_plot(
+                    st.session_state.all_stockout_rates_df, selected_sku, 'Stockout_Rate', forecast_roll_up_choice, 'mean'
+                )
+                
+                if not stockout_plot_df.empty:
+                    fig_stockout = px.line(
+                        stockout_plot_df,
+                        x="Date",
+                        y="Value",
+                        title=f"Stockout Rate for {selected_sku} (Roll-up: {forecast_roll_up_choice})",
+                        labels={"Value": "Stockout Rate (%)", "Date": forecast_roll_up_choice},
+                        color_discrete_sequence=['orange']
+                    )
+                    fig_stockout.update_layout(hovermode="x unified")
+                    st.plotly_chart(fig_stockout, use_container_width=True)
+                else:
+                    st.info(f"No Stockout Rate data to plot for {selected_sku}.")
+            else:
+                st.info("No SKUs available for Stockout Rate plotting.")
+        else:
+            st.info("No Inventory data available. Please upload your data or run on Sample Data.")
+
+else:
+    st.info("Please upload your data or generate sample data to begin.")
