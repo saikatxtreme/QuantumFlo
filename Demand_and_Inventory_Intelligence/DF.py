@@ -435,7 +435,8 @@ def run_full_simulation(
                         "Item_ID": item,
                         "Location": location,
                         "Quantity": quantity,
-                        "Description": f"Shipment of {quantity} {item} arrived at {location}."
+                        "Description": f"Shipment of {quantity} {item} arrived at {location}.",
+                        "Source_Location": "N/A" # No specific source recorded for direct arrival
                     })
         
         # 2. Process demand at the retail store level (bottom-up approach)
@@ -464,7 +465,8 @@ def run_full_simulation(
                     "Item_ID": sku,
                     "Location": location,
                     "Quantity": demand_qty,
-                    "Description": f"Customer demand for {demand_qty} {sku} at {location}. {shipped_qty} fulfilled, {lost_sales} lost sales."
+                    "Description": f"Customer demand for {demand_qty} {sku} at {location}. {shipped_qty} fulfilled, {lost_sales} lost sales.",
+                    "Source_Location": "N/A"
                 })
                 
                 # Check reorder point for stores
@@ -501,9 +503,10 @@ def run_full_simulation(
                             "Date": current_date,
                             "Type": "Reorder_Placed",
                             "Item_ID": sku,
-                            "Location": location,
+                            "Location": location, # Requesting location
                             "Quantity": order_qty,
-                            "Description": f"Reorder of {order_qty} {sku} placed with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
+                            "Description": f"Reorder of {order_qty} {sku} placed by {location} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}. Suggested Indent: {order_qty}.",
+                            "Source_Location": supplier # Source of the order
                         })
                 
         # 3. Process demand at DCs (from store orders)
@@ -515,25 +518,32 @@ def run_full_simulation(
                 
                 inventory_levels[(location, item)] = current_stock - shipped_qty
                 
-                # Schedule shipment
-                lead_time_df_dc = df_lead_times[(df_lead_times['From_Location'] == location) & (df_lead_times['Item_ID'] == item)]
-                if not lead_time_df_dc.empty:
-                    lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
-                    destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=int(lead_time))
-                    
-                    incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
-
+                # Schedule shipment to the requesting location
+                # This needs to be more robust to find the *exact* requesting location.
+                # For simplicity, we assume the demand_for_today came from a known downstream.
+                # In a full system, you'd track the origin of the demand.
+                # For now, we simulate an 'internal transfer' from DC to stores
+                # or shipment from Factory to DC
+                
+                # Find where this DC sends this item based on lead times
+                # This is a simplification; a DC might supply multiple locations.
+                # We'll assume the lead time entry exists for the *next* hop.
+                
+                # To get the specific destination for this fulfilled order,
+                # we'd need more complex event tracking (who ordered from this DC)
+                # For this simulation, we'll just log fulfillment at DC.
+                
                 simulation_events.append({
                     "Date": current_date,
                     "Type": "DC_Order_Fulfillment",
                     "Item_ID": item,
-                    "Location": location,
+                    "Location": location, # DC location
                     "Quantity": shipped_qty,
-                    "Description": f"DC {location} fulfilled {shipped_qty} of order for {item}."
+                    "Description": f"DC {location} fulfilled {shipped_qty} of order for {item}. This is an internal transfer.",
+                    "Source_Location": "N/A" # Fulfilled from internal stock
                 })
                 
-                # Check reorder point for DCs
+                # Check reorder point for DCs (to order from factories/vendors)
                 lead_time_df_dc_up = df_lead_times[(df_lead_times['To_Location'] == location) & (df_lead_times['Item_ID'] == item)]
                 if not lead_time_df_dc_up.empty:
                     lead_time_up = lead_time_df_dc_up.iloc[0]['Lead_Time_Days']
@@ -552,22 +562,20 @@ def run_full_simulation(
                         supplier = lead_time_df_dc_up.iloc[0]['From_Location']
                         arrival_date = current_date + timedelta(days=int(lead_time_up))
                         
-                        # Place order with the factory
-                        # We'll just add it to incoming shipments for now as factories have different logic
-                        
                         incoming_shipments.setdefault(arrival_date, {}).setdefault((location, item), []).append(order_qty)
                         total_ordering_cost += ordering_cost
                         
                         simulation_events.append({
                             "Date": current_date,
-                            "Type": "DC_Reorder",
+                            "Type": "Reorder_Placed",
                             "Item_ID": item,
-                            "Location": location,
+                            "Location": location, # Requesting location (DC)
                             "Quantity": order_qty,
-                            "Description": f"DC {location} placed a reorder of {order_qty} {item} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
+                            "Description": f"DC {location} placed a reorder of {order_qty} {item} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}. Suggested Indent: {order_qty}.",
+                            "Source_Location": supplier # Source of the order (Factory or Vendor)
                         })
         
-        # 4. Process factory production (based on orders from DCs)
+        # 4. Process factory production (based on orders from DCs or direct)
         for (location, item), demand_qty in demand_for_today.items():
             if 'Factory' in location:
                 # Check BOM if enabled
@@ -583,7 +591,8 @@ def run_full_simulation(
                                 "Item_ID": item,
                                 "Location": location,
                                 "Quantity": demand_qty,
-                                "Description": f"Production of {item} held at {location} due to insufficient component {component}. Needed: {qty_needed}, In Stock: {inventory_levels.get((location, component), 0)}."
+                                "Description": f"Production of {item} held at {location} due to insufficient component {component}. Needed: {qty_needed}, In Stock: {inventory_levels.get((location, component), 0)}.",
+                                "Source_Location": "N/A"
                             })
                             break
                 
@@ -603,7 +612,8 @@ def run_full_simulation(
                         "Item_ID": item,
                         "Location": location,
                         "Quantity": demand_qty,
-                        "Description": f"Factory {location} produced {demand_qty} of {item}."
+                        "Description": f"Factory {location} produced {demand_qty} of {item}.",
+                        "Source_Location": "N/A"
                     })
         
         # 5. Calculate daily costs
@@ -622,6 +632,10 @@ def run_full_simulation(
     # Finalize results
     df_inventory_history = pd.DataFrame(inventory_history)
     df_simulation_events = pd.DataFrame(simulation_events)
+    # Add 'Source_Location' as a default column if it was not always added
+    if 'Source_Location' not in df_simulation_events.columns:
+        df_simulation_events['Source_Location'] = 'N/A'
+
 
     return {
         "df_inventory_history": df_inventory_history,
@@ -630,7 +644,8 @@ def run_full_simulation(
         "total_ordering_cost": total_ordering_cost,
         "total_stockout_cost": total_stockout_cost,
         "total_sales_demand": total_sales_demand,
-        "total_lost_sales": total_lost_sales
+        "total_lost_sales": total_lost_sales,
+        "historical_sales_end_date": df_sales['Date'].max() # To draw the forecast line
     }
 
 
@@ -639,6 +654,10 @@ st.set_page_config(layout="wide", page_title="Supply Chain App")
 
 st.title("Advanced Supply Chain Intelligence App")
 st.markdown("Analyze demand, simulate your supply chain, and optimize inventory policy with custom data.")
+
+# Initialize session state for simulation results
+if 'simulation_results' not in st.session_state:
+    st.session_state.simulation_results = None
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Configuration")
@@ -670,7 +689,6 @@ if data_source == "Upload Custom Data":
         
         uploaded_file = st.sidebar.file_uploader(label, type="csv", key=filename)
         if uploaded_file is not None:
-            # Use the cached load_csv_data function
             uploaded_data[filename] = load_csv_data(uploaded_file)
         elif not is_optional:
             st.warning(f"Required file '{filename}' is missing.")
@@ -709,7 +727,7 @@ bom_check = st.sidebar.checkbox("BOM Check (Enable for production constraints)",
 
 # Main content
 if run_simulation_button:
-    st.header("Simulation Results")
+    st.header("Running Simulation...")
     
     with st.spinner("Preparing and running simulation... This may take a moment."):
         if data_source == "Generated Sample Data":
@@ -732,6 +750,7 @@ if run_simulation_button:
         required_files = ["sales_data.csv", "inventory_data.csv", "lead_times_data.csv", "bom_data.csv"]
         if not all(all_dfs.get(f) is not None and not all_dfs.get(f).empty for f in required_files):
             st.error("Cannot run simulation. One or more required data files are missing or empty.")
+            st.session_state.simulation_results = None # Clear previous results on error
         else:
             # Determine simulation start and end dates
             df_sales['Date'] = pd.to_datetime(df_sales['Date']) # Ensure Date column is datetime
@@ -739,7 +758,7 @@ if run_simulation_button:
             sim_end_date = sim_start_date + timedelta(days=simulation_days - 1)
 
             # Run the full simulation
-            simulation_results = run_full_simulation(
+            st.session_state.simulation_results = run_full_simulation(
                 df_sales,
                 df_inventory,
                 df_lead_times,
@@ -753,68 +772,98 @@ if run_simulation_button:
                 forecast_model,
                 forecast_duration_days # Pass the new parameter
             )
-            
-            st.markdown("---")
-            st.subheader("Simulation Key Performance Indicators")
-            col1, col2, col3 = st.columns(3)
-            
-            total_cost = simulation_results['total_holding_cost'] + simulation_results['total_ordering_cost'] + simulation_results['total_stockout_cost']
-            service_level_perc = 100 * (1 - (simulation_results['total_lost_sales'] / simulation_results['total_sales_demand'])) if simulation_results['total_sales_demand'] > 0 else 100
-            
-            col1.metric("Total Cost", f"${total_cost:,.2f}")
-            col2.metric("Total Lost Sales", f"{simulation_results['total_lost_sales']:,}")
-            col3.metric("Service Level", f"{service_level_perc:,.2f}%")
-            
-            with st.expander("Cost Breakdown"):
-                st.write(f"**Total Holding Cost:** ${simulation_results['total_holding_cost']:,.2f}")
-                st.write(f"**Total Ordering Cost:** ${simulation_results['total_ordering_cost']:,.2f}")
-                st.write(f"**Total Stockout Cost:** ${simulation_results['total_stockout_cost']:,.2f}")
+            st.success("Simulation complete!")
 
-            st.markdown("---")
+# Display results if available in session state
+if st.session_state.simulation_results:
+    st.header("Simulation Results")
+    simulation_results = st.session_state.simulation_results # Get results from session state
+    
+    st.markdown("---")
+    st.subheader("Simulation Key Performance Indicators")
+    col1, col2, col3 = st.columns(3)
+    
+    total_cost = simulation_results['total_holding_cost'] + simulation_results['total_ordering_cost'] + simulation_results['total_stockout_cost']
+    service_level_perc = 100 * (1 - (simulation_results['total_lost_sales'] / simulation_results['total_sales_demand'])) if simulation_results['total_sales_demand'] > 0 else 100
+    
+    col1.metric("Total Cost", f"${total_cost:,.2f}")
+    col2.metric("Total Lost Sales", f"{simulation_results['total_lost_sales']:,}")
+    col3.metric("Service Level", f"{service_level_perc:,.2f}%")
+    
+    with st.expander("Cost Breakdown"):
+        st.write(f"**Total Holding Cost:** ${simulation_results['total_holding_cost']:,.2f}")
+        st.write(f"**Total Ordering Cost:** ${simulation_results['total_ordering_cost']:,.2f}")
+        st.write(f"**Total Stockout Cost:** ${simulation_results['total_stockout_cost']:,.2f}")
+
+    st.markdown("---")
+    
+    st.subheader("Inventory Levels Over Time")
+    df_inventory_history = simulation_results['df_inventory_history']
+    
+    # Use data from the simulation results for selectbox options
+    all_locations = df_inventory_history['Location'].unique()
+    all_items = df_inventory_history['Item_ID'].unique()
+    
+    selected_location = st.selectbox("Select Location for Inventory Plot", all_locations, key='location_select')
+    selected_item = st.selectbox("Select SKU/Component for Inventory Plot", all_items, key='item_select')
+    
+    df_plot = df_inventory_history[(df_inventory_history['Location'] == selected_location) & (df_inventory_history['Item_ID'] == selected_item)]
+    
+    if not df_plot.empty:
+        fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
+        
+        # Add a vertical line for the forecast start
+        if simulation_results['historical_sales_end_date'] is not None:
+            forecast_start_vline_x = simulation_results['historical_sales_end_date']
+            fig.add_vline(x=forecast_start_vline_x, line_dash="dash", line_color="red")
+            fig.add_annotation(
+                x=forecast_start_vline_x,
+                y=1.05,
+                xref="x",
+                yref="paper",
+                text="Forecast Start",
+                showarrow=False,
+                font=dict(color="red"),
+                xanchor="left"
+            )
+        else:
+            st.warning("Cannot show forecast start line as historical sales data end date is not available.")
+                                
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("No inventory data to display for the selected item and location.")
             
-            st.subheader("Inventory Levels Over Time")
-            all_locations = simulation_results['df_inventory_history']['Location'].unique()
-            all_items = simulation_results['df_inventory_history']['Item_ID'].unique()
-            
-            selected_location = st.selectbox("Select Location", all_locations)
-            selected_item = st.selectbox("Select SKU/Component", all_items)
-            
-            df_plot = simulation_results['df_inventory_history']
-            df_plot = df_plot[(df_plot['Location'] == selected_location) & (df_plot['Item_ID'] == selected_item)]
-            
-            if not df_plot.empty:
-                fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
-                
-                # Add a vertical line for the forecast start
-                if not df_sales.empty:
-                    forecast_start_vline_x = df_sales['Date'].max()
-                    # Removed annotation_text and annotation_position to avoid TypeError
-                    fig.add_vline(x=forecast_start_vline_x, line_dash="dash", line_color="red")
-                    # Optionally, add annotation separately if needed and if it doesn't cause issues
-                    fig.add_annotation(
-                        x=forecast_start_vline_x,
-                        y=1.05, # Y-position in 'paper' coordinates (0 to 1) for top of plot
-                        xref="x",
-                        yref="paper",
-                        text="Forecast Start",
-                        showarrow=False,
-                        font=dict(color="red"),
-                        xanchor="left" # Adjust anchor for better positioning
-                    )
-                else:
-                    st.warning("Cannot show forecast start line as historical sales data is empty.")
-                                        
-                st.plotly_chart(fig, use_container_width=True)
-            else:
-                st.info("No inventory data to display for the selected item and location.")
-                
-            st.markdown("---")
-            st.subheader("Detailed Simulation Events & Alerts")
-            with st.expander("View Event Log"):
-                if not simulation_results['df_simulation_events'].empty:
-                    st.dataframe(simulation_results['df_simulation_events'], use_container_width=True)
-                else:
-                    st.info("No events to display.")
+    st.markdown("---")
+    st.subheader("Detailed Simulation Events & Alerts")
+    df_simulation_events = simulation_results['df_simulation_events']
+
+    if not df_simulation_events.empty:
+        # Filtering for event types
+        event_types = df_simulation_events['Type'].unique()
+        selected_event_types = st.multiselect("Filter by Event Type", event_types, default=event_types)
+        
+        # Filtering for specific locations/items (optional, can be extensive)
+        # For simplicity, let's keep it to event types for now
+        
+        filtered_events = df_simulation_events[df_simulation_events['Type'].isin(selected_event_types)]
+
+        st.dataframe(filtered_events[['Date', 'Type', 'Item_ID', 'Location', 'Quantity', 'Source_Location', 'Description']], use_container_width=True)
+
+        st.markdown("#### Suggested Indents (Reorders Placed)")
+        df_reorders = filtered_events[filtered_events['Type'] == 'Reorder_Placed'].copy()
+        if not df_reorders.empty:
+            st.dataframe(df_reorders[['Date', 'Item_ID', 'Location', 'Source_Location', 'Quantity', 'Description']], use_container_width=True)
+            st.info("""
+                **Order From / Internal Transfer / Order from Vendor Explanation:**
+                - `Location`: The location that placed the order (e.g., a store or a DC).
+                - `Source_Location`: The supplier from which the order was placed. This can be an internal location (like a DC or Factory, indicating an internal transfer) or an external vendor.
+                - `Quantity`: This is the "Suggested Indent" or the order quantity placed by the `Location` with the `Source_Location`.
+            """)
+        else:
+            st.info("No 'Reorder Placed' events to display for the selected filters.")
+
+    else:
+        st.info("No simulation events to display.")
 
 
 else:
