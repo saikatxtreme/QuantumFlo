@@ -1,3 +1,7 @@
+# DFv13.py - Demand and Inventory Intelligence Streamlit App
+# Features: Full multi-echelon simulation, detailed cost analysis, BOM integration,
+#           comprehensive reporting, and now includes a forecast model selector and FAQ.
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -344,6 +348,93 @@ def forecast_demand(df_sales, forecast_model, forecast_days, ma_window_size=7):
     
     return pd.DataFrame(forecast_results)
 
+def suggest_indent_orders(df_inventory_latest, df_forecast, df_lead_times, safety_stock_method, service_level, current_simulation_date):
+    """
+    Suggests indent orders (internal transfers or vendor orders) based on current inventory,
+    forecasted demand, lead times, MOQ, and order multiples.
+    """
+    suggestions = []
+
+    # Get unique (To_Location, Item_ID) pairs from lead times, which are the "demand points"
+    demand_points = df_lead_times[['To_Location', 'Item_ID']].drop_duplicates().values
+
+    for location, item_id in demand_points:
+        # Get lead time details for this location-item pair
+        lead_time_df_row = df_lead_times[(df_lead_times['To_Location'] == location) & 
+                                        (df_lead_times['Item_ID'] == item_id)]
+        
+        if lead_time_df_row.empty:
+            continue # No lead time info for this item at this location, skip
+
+        lead_time_days = lead_time_df_row.iloc[0]['Lead_Time_Days']
+        min_order_qty = lead_time_df_row.iloc[0]['Min_Order_Quantity']
+        order_multiple = lead_time_df_row.iloc[0]['Order_Multiple']
+        from_location = lead_time_df_row.iloc[0]['From_Location']
+
+        # Get current inventory
+        current_stock = df_inventory_latest.get((location, item_id), 0)
+
+        # Calculate average daily demand for this item at this location from forecast
+        df_item_location_forecast = df_forecast[(df_forecast['SKU_ID'] == item_id) & 
+                                                (df_forecast['Location'] == location)]
+        
+        avg_daily_demand = df_item_location_forecast['Sales_Quantity'].mean() if not df_item_location_forecast.empty else 0
+
+        # Calculate safety stock
+        if safety_stock_method == "King's Method":
+            ss = calculate_safety_stock_kings(df_item_location_forecast, lead_time_days, service_level / 100)
+        else:
+            ss = calculate_safety_stock_avg_max(df_item_location_forecast, lead_time_days)
+
+        # Calculate Reorder Point (ROP)
+        reorder_point = (avg_daily_demand * lead_time_days) + ss
+
+        # Calculate demand during lead time from forecast
+        # This considers the actual forecasted demand for the lead time period
+        forecast_end_date_for_lead_time = current_simulation_date + timedelta(days=lead_time_days)
+        demand_during_lead_time_df = df_item_location_forecast[
+            (df_item_location_forecast['Date'] > current_simulation_date) & 
+            (df_item_location_forecast['Date'] <= forecast_end_date_for_lead_time)
+        ]
+        demand_during_lead_time = demand_during_lead_time_df['Sales_Quantity'].sum()
+
+        # If current stock is below reorder point, suggest an order
+        if current_stock < reorder_point:
+            # Target inventory to cover demand during lead time plus safety stock
+            target_inventory = demand_during_lead_time + ss
+            
+            # Calculate raw quantity to order
+            raw_order_qty = max(0, target_inventory - current_stock)
+
+            # Adjust quantity to meet Min_Order_Quantity and Order_Multiple
+            if raw_order_qty > 0:
+                order_qty = max(min_order_qty, raw_order_qty)
+                order_qty = math.ceil(order_qty / order_multiple) * order_multiple
+            else:
+                order_qty = 0 # No order needed if raw_order_qty is 0 or less
+            
+            if order_qty > 0:
+                order_type = "Vendor Order"
+                if "DC-" in from_location or "Factory-" in from_location:
+                    order_type = "Internal Transfer"
+
+                suggestions.append({
+                    "Date_of_Suggestion": current_simulation_date,
+                    "Item_ID": item_id,
+                    "Location_Needing_Order": location,
+                    "Supplier_Location": from_location,
+                    "Order_Type": order_type,
+                    "Suggested_Order_Quantity": order_qty,
+                    "Current_Stock": current_stock,
+                    "Reorder_Point": int(reorder_point),
+                    "Lead_Time_Days": lead_time_days,
+                    "Min_Order_Quantity": min_order_qty,
+                    "Order_Multiple": order_multiple
+                })
+    
+    return pd.DataFrame(suggestions)
+
+
 def run_full_simulation(
     df_sales, 
     df_inventory, 
@@ -360,6 +451,7 @@ def run_full_simulation(
 ):
     """
     Runs a time-series simulation of the entire supply chain network.
+    Returns simulation results and the forecast DataFrame.
     """
     st.info("Running full supply chain simulation...")
 
@@ -399,13 +491,13 @@ def run_full_simulation(
     forecast_end_date = end_date # This 'end_date' is 'sim_end_date' passed from the main function
     forecast_days = (forecast_end_date - forecast_start_date).days + 1
     
+    df_forecast = pd.DataFrame() # Initialize df_forecast
     if forecast_days > 0:
         st.info(f"Generating a {forecast_days}-day demand forecast using {forecast_model}...")
         df_forecast = forecast_demand(df_sales, forecast_model, forecast_days, ma_window_size) # Pass ma_window_size
     else:
         st.info("No future forecast period defined by 'Simulation Duration'. Running simulation only on historical data.")
-        df_forecast = pd.DataFrame(columns=df_sales.columns)
-    
+        
     # Combine historical and forecast data for simulation
     df_sim_demand = pd.concat([df_sales, df_forecast]).sort_values('Date').reset_index(drop=True)
     sim_demand_by_date = df_sim_demand.groupby('Date')
@@ -461,37 +553,54 @@ def run_full_simulation(
                     lead_time = lead_time_df_store.iloc[0]['Lead_Time_Days']
                     
                     # Calculate reorder point and order quantity
+                    df_demand_for_ss = df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)]
                     if safety_stock_method == "King's Method":
-                        ss = calculate_safety_stock_kings(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time, service_level / 100)
+                        ss = calculate_safety_stock_kings(df_demand_for_ss, lead_time, service_level / 100)
                     else:
-                        ss = calculate_safety_stock_avg_max(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time)
+                        ss = calculate_safety_stock_avg_max(df_demand_for_ss, lead_time)
                     
                     # Assume ROP = Daily Avg Demand * Lead Time + Safety Stock
-                    avg_daily_demand = df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)]['Sales_Quantity'].mean() or 0
+                    avg_daily_demand = df_demand_for_ss['Sales_Quantity'].mean() if not df_demand_for_ss.empty else 0
                     reorder_point = avg_daily_demand * lead_time + ss
                     
                     if inventory_levels.get((location, sku), 0) <= reorder_point:
                         min_order_qty = lead_time_df_store.iloc[0]['Min_Order_Quantity']
                         order_multiple = lead_time_df_store.iloc[0]['Order_Multiple']
                         
-                        order_qty = max(min_order_qty, (avg_daily_demand * lead_time) + ss)
-                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple # Changed order_qty calculation based on multiple
+                        # Calculate quantity needed to bring stock up to ROP + Lead Time Demand + SS (simplified)
+                        # Target stock to cover demand during lead time + safety stock
+                        # Get forecast for the next `lead_time` days starting from current_date
+                        forecast_period_start = current_date + timedelta(days=1)
+                        forecast_period_end = current_date + timedelta(days=lead_time)
                         
-                        supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time)) # Cast to int
+                        demand_during_lead_time_forecast = df_forecast[
+                            (df_forecast['Date'] >= forecast_period_start) & 
+                            (df_forecast['Date'] <= forecast_period_end) &
+                            (df_forecast['SKU_ID'] == sku) &
+                            (df_forecast['Location'] == location)
+                        ]['Sales_Quantity'].sum()
                         
-                        # Place order with the upstream location
-                        demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
-                        total_ordering_cost += ordering_cost
+                        raw_order_qty = max(0, (demand_during_lead_time_forecast + ss) - inventory_levels.get((location, sku), 0))
+
+                        order_qty = max(min_order_qty, raw_order_qty)
+                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple if order_multiple > 0 else order_qty
                         
-                        simulation_events.append({
-                            "Date": current_date,
-                            "Type": "Reorder_Placed",
-                            "Item_ID": sku,
-                            "Location": location,
-                            "Quantity": order_qty,
-                            "Description": f"Reorder of {order_qty} {sku} placed with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
-                        })
+                        if order_qty > 0:
+                            supplier = lead_time_df_store.iloc[0]['From_Location']
+                            arrival_date = current_date + timedelta(days=int(lead_time)) # Cast to int
+                            
+                            # Place order with the upstream location
+                            demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
+                            total_ordering_cost += ordering_cost
+                            
+                            simulation_events.append({
+                                "Date": current_date,
+                                "Type": "Reorder_Placed",
+                                "Item_ID": sku,
+                                "Location": location,
+                                "Quantity": order_qty,
+                                "Description": f"Reorder of {order_qty} {sku} placed with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
+                            })
                 
         # 3. Process demand at DCs (from store orders)
         for (location, item), demand_qty in demand_for_today.items():
@@ -506,7 +615,8 @@ def run_full_simulation(
                 lead_time_df_dc = df_lead_times[(df_lead_times['From_Location'] == location) & (df_lead_times['Item_ID'] == item)]
                 if not lead_time_df_dc.empty:
                     lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
-                    destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
+                    destination_location_row = df_lead_times[(df_lead_times['From_Location'] == location) & (df_lead_times['Item_ID'] == item)].iloc[0]
+                    destination_location = destination_location_row['To_Location'] # Get specific destination
                     arrival_date = current_date + timedelta(days=int(lead_time)) # Cast to int
                     
                     incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
@@ -526,33 +636,52 @@ def run_full_simulation(
                     lead_time_up = lead_time_df_dc_up.iloc[0]['Lead_Time_Days']
                     
                     # Assume ROP logic for DCs is similar to stores but based on aggregate demand
-                    avg_daily_demand_dc = demand_qty # This is a simplification
-                    reorder_point = avg_daily_demand_dc * lead_time_up
+                    df_demand_for_ss_dc = df_sim_demand[(df_sim_demand['SKU_ID'] == item) & 
+                                                        (df_sim_demand['Location'].isin(df_lead_times[df_lead_times['From_Location'] == location]['To_Location'].unique()))] # Demand from all stores supplied by this DC
                     
-                    if inventory_levels.get((location, item), 0) <= reorder_point:
-                        min_order_qty = lead_time_df_dc_up.iloc[0]['Min_Order_Quantity']
-                        order_multiple = lead_time_df_dc_up.iloc[0]['Order_Multiple']
+                    if safety_stock_method == "King's Method":
+                        ss_dc = calculate_safety_stock_kings(df_demand_for_ss_dc, lead_time_up, service_level / 100)
+                    else:
+                        ss_dc = calculate_safety_stock_avg_max(df_demand_for_ss_dc, lead_time_up)
+
+                    avg_daily_demand_dc = df_demand_for_ss_dc['Sales_Quantity'].mean() if not df_demand_for_ss_dc.empty else 0
+                    reorder_point_dc = avg_daily_demand_dc * lead_time_up + ss_dc
+                    
+                    if inventory_levels.get((location, item), 0) <= reorder_point_dc:
+                        min_order_qty_dc = lead_time_df_dc_up.iloc[0]['Min_Order_Quantity']
+                        order_multiple_dc = lead_time_df_dc_up.iloc[0]['Order_Multiple']
                         
-                        order_qty = max(min_order_qty, (avg_daily_demand_dc * lead_time_up) + random.randint(50, 100))
-                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple # Changed order_qty calculation based on multiple
+                        # Get forecast for the next `lead_time_up` days for DC's downstream demand
+                        forecast_period_start_dc = current_date + timedelta(days=1)
+                        forecast_period_end_dc = current_date + timedelta(days=lead_time_up)
                         
-                        supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Cast to int
+                        demand_during_lead_time_forecast_dc = df_forecast[
+                            (df_forecast['Date'] >= forecast_period_start_dc) & 
+                            (df_forecast['Date'] <= forecast_period_end_dc) &
+                            (df_forecast['SKU_ID'] == item) &
+                            (df_forecast['Location'].isin(df_lead_times[df_lead_times['From_Location'] == location]['To_Location'].unique()))
+                        ]['Sales_Quantity'].sum()
+
+                        raw_order_qty_dc = max(0, (demand_during_lead_time_forecast_dc + ss_dc) - inventory_levels.get((location, item), 0))
+
+                        order_qty_dc = max(min_order_qty_dc, raw_order_qty_dc)
+                        order_qty_dc = math.ceil(order_qty_dc / order_multiple_dc) * order_multiple_dc if order_multiple_dc > 0 else order_qty_dc
                         
-                        # Place order with the factory
-                        # We'll just add it to incoming shipments for now as factories have different logic
-                        
-                        incoming_shipments.setdefault(arrival_date, {}).setdefault((location, item), []).append(order_qty)
-                        total_ordering_cost += ordering_cost
-                        
-                        simulation_events.append({
-                            "Date": current_date,
-                            "Type": "DC_Reorder",
-                            "Item_ID": item,
-                            "Location": location,
-                            "Quantity": order_qty,
-                            "Description": f"DC {location} placed a reorder of {order_qty} {item} with {supplier}. Expected arrival: {arrival_date.strftime('%Y-%m-%d')}."
-                        })
+                        if order_qty_dc > 0:
+                            supplier_up = lead_time_df_dc_up.iloc[0]['From_Location']
+                            arrival_date_up = current_date + timedelta(days=int(lead_time_up)) # Cast to int
+                            
+                            incoming_shipments.setdefault(arrival_date_up, {}).setdefault((location, item), []).append(order_qty_dc)
+                            total_ordering_cost += ordering_cost
+                            
+                            simulation_events.append({
+                                "Date": current_date,
+                                "Type": "DC_Reorder",
+                                "Item_ID": item,
+                                "Location": location,
+                                "Quantity": order_qty_dc,
+                                "Description": f"DC {location} placed a reorder of {order_qty_dc} {item} with {supplier_up}. Expected arrival: {arrival_date_up.strftime('%Y-%m-%d')}."
+                            })
         
         # 4. Process factory production (based on orders from DCs)
         for (location, item), demand_qty in demand_for_today.items():
@@ -561,8 +690,8 @@ def run_full_simulation(
                 can_produce = True
                 if bom_check and item in bom_map:
                     for component in bom_map[item]:
-                        qty_needed = bom_quantity_map.get((item, component), 0) * demand_qty
-                        if inventory_levels.get((location, component), 0) < qty_needed:
+                        qty_required = bom_quantity_map.get((item, component), 0) * demand_qty
+                        if inventory_levels.get((location, component), 0) < qty_required:
                             can_produce = False
                             simulation_events.append({
                                 "Date": current_date,
@@ -570,7 +699,7 @@ def run_full_simulation(
                                 "Item_ID": item,
                                 "Location": location,
                                 "Quantity": demand_qty,
-                                "Description": f"Production of {item} held at {location} due to insufficient component {component}. Needed: {qty_needed}, In Stock: {inventory_levels.get((location, component), 0)}."
+                                "Description": f"Production of {item} held at {location} due to insufficient component {component}. Needed: {qty_required}, In Stock: {inventory_levels.get((location, component), 0)}."
                             })
                             break
                 
@@ -578,8 +707,8 @@ def run_full_simulation(
                     # Deduct components from inventory
                     if item in bom_map:
                         for component in bom_map[item]:
-                            qty_needed = bom_quantity_map.get((item, component), 0) * demand_qty
-                            inventory_levels[(location, component)] = inventory_levels.get((location, component), 0) - qty_needed
+                            qty_required = bom_quantity_map.get((item, component), 0) * demand_qty
+                            inventory_levels[(location, component)] = inventory_levels.get((location, component), 0) - qty_required
                             
                     # Add finished goods to inventory
                     inventory_levels[(location, item)] = inventory_levels.get((location, item), 0) + demand_qty
@@ -617,7 +746,9 @@ def run_full_simulation(
         "total_ordering_cost": total_ordering_cost,
         "total_stockout_cost": total_stockout_cost,
         "total_sales_demand": total_sales_demand,
-        "total_lost_sales": total_lost_sales
+        "total_lost_sales": total_lost_sales,
+        "df_forecast": df_forecast, # Return the forecast DataFrame
+        "latest_inventory_levels": inventory_levels # Return the final state of inventory levels
     }
 
 
@@ -777,21 +908,83 @@ if run_simulation_button:
             st.markdown("---")
             
             st.subheader("Inventory Levels Over Time")
-            all_locations = simulation_results['df_inventory_history']['Location'].unique()
-            all_items = simulation_results['df_inventory_history']['Item_ID'].unique()
+            all_locations_inv = simulation_results['df_inventory_history']['Location'].unique()
+            all_items_inv = simulation_results['df_inventory_history']['Item_ID'].unique()
             
-            selected_location = st.selectbox("Select Location", all_locations)
-            selected_item = st.selectbox("Select SKU/Component", all_items)
+            selected_location_inv = st.selectbox("Select Location for Inventory", all_locations_inv)
+            selected_item_inv = st.selectbox("Select SKU/Component for Inventory", all_items_inv)
             
-            df_plot = simulation_results['df_inventory_history']
-            df_plot = df_plot[(df_plot['Location'] == selected_location) & (df_plot['Item_ID'] == selected_item)]
+            df_plot_inv = simulation_results['df_inventory_history']
+            df_plot_inv = df_plot_inv[(df_plot_inv['Location'] == selected_location_inv) & (df_plot_inv['Item_ID'] == selected_item_inv)]
             
-            if not df_plot.empty:
-                fig = px.line(df_plot, x="Date", y="Stock", title=f"Inventory Level for {selected_item} at {selected_location}")
-                st.plotly_chart(fig, use_container_width=True)
+            if not df_plot_inv.empty:
+                fig_inv = px.line(df_plot_inv, x="Date", y="Stock", title=f"Inventory Level for {selected_item_inv} at {selected_location_inv}")
+                st.plotly_chart(fig_inv, use_container_width=True)
             else:
                 st.info("No inventory data to display for the selected item and location.")
+            
+            st.markdown("---")
+            st.subheader("Demand Forecasts")
+            df_forecast = simulation_results['df_forecast']
+            if not df_forecast.empty:
+                all_locations_forecast = df_forecast['Location'].unique()
+                all_items_forecast = df_forecast['SKU_ID'].unique()
+
+                selected_location_forecast = st.selectbox("Select Location for Forecast", all_locations_forecast)
+                selected_item_forecast = st.selectbox("Select SKU/Component for Forecast", all_items_forecast)
                 
+                df_plot_forecast = df_forecast[
+                    (df_forecast['Location'] == selected_location_forecast) & 
+                    (df_forecast['SKU_ID'] == selected_item_forecast)
+                ]
+                
+                if not df_plot_forecast.empty:
+                    fig_forecast = px.line(df_plot_forecast, x="Date", y="Sales_Quantity", title=f"Demand Forecast for {selected_item_forecast} at {selected_location_forecast}")
+                    st.plotly_chart(fig_forecast, use_container_width=True)
+                else:
+                    st.info("No forecast data to display for the selected item and location.")
+            else:
+                st.info("No demand forecast was generated for the simulation period.")
+
+
+            st.markdown("---")
+            st.subheader("Suggested Indent Orders")
+            # Get the latest inventory levels from the simulation results
+            latest_inventory_levels_dict = simulation_results['latest_inventory_levels']
+            
+            # Use the end date of the simulation as the current date for order suggestion
+            current_date_for_indent = sim_end_date 
+
+            df_indent_suggestions = suggest_indent_orders(
+                latest_inventory_levels_dict, 
+                df_forecast, 
+                df_lead_times, 
+                safety_stock_method, 
+                service_level,
+                current_date_for_indent
+            )
+            
+            if not df_indent_suggestions.empty:
+                st.dataframe(df_indent_suggestions, use_container_width=True)
+
+                st.markdown("##### Summary of Suggested Orders by Type")
+                order_type_summary = df_indent_suggestions.groupby('Order_Type')['Suggested_Order_Quantity'].sum().reset_index()
+                fig_order_type = px.bar(order_type_summary, x='Order_Type', y='Suggested_Order_Quantity', 
+                                        title='Total Suggested Orders by Type')
+                st.plotly_chart(fig_order_type, use_container_width=True)
+
+                st.markdown("##### Summary of Suggested Orders by Supplier")
+                supplier_summary = df_indent_suggestions.groupby('Supplier_Location')['Suggested_Order_Quantity'].sum().reset_index()
+                fig_supplier = px.bar(supplier_summary, x='Supplier_Location', y='Suggested_Order_Quantity', 
+                                      title='Total Suggested Orders by Supplier')
+                st.plotly_chart(fig_supplier, use_container_width=True)
+
+                st.warning("Note on Shelf Life and Max Capacity: The current order suggestion logic does not explicitly account for SKU shelf life expiration or maximum warehouse/storage capacity. These factors would require more complex inventory tracking and constraint modeling.")
+
+            else:
+                st.info("No indent orders suggested based on current inventory and forecast. Inventory levels are sufficient.")
+
+
             st.markdown("---")
             st.subheader("Detailed Simulation Events & Alerts")
             with st.expander("View Event Log"):
