@@ -272,9 +272,10 @@ def calculate_historical_fill_rate(df_actual_orders, df_actual_shipments):
     fill_rate = (total_shipped / total_ordered) * 100
     return fill_rate
 
-def forecast_demand(df_sales, forecast_model, forecast_days):
+def forecast_demand(df_sales, forecast_model, forecast_days, ma_window_size=7):
     """
     Generates a forecast for future sales demand using the selected model.
+    Added ma_window_size parameter.
     """
     df_sales['Date'] = pd.to_datetime(df_sales['Date'])
     df_daily_demand = df_sales.groupby(['Date', 'SKU_ID', 'Location'])['Sales_Quantity'].sum().reset_index()
@@ -294,12 +295,12 @@ def forecast_demand(df_sales, forecast_model, forecast_days):
             future_dates = pd.date_range(start=last_date + timedelta(days=1), periods=forecast_days)
             
             if forecast_model == "Moving Average":
-                window_size = 7
+                window_size = ma_window_size # Use user-defined window size
                 df_subset['Moving_Average'] = df_subset['Sales_Quantity'].rolling(window=window_size).mean()
                 last_avg = df_subset['Moving_Average'].iloc[-1] if not df_subset['Moving_Average'].isnull().all() else 0
                 forecast_values = [last_avg] * forecast_days
             elif forecast_model == "Moving Median":
-                window_size = 7
+                window_size = ma_window_size # Use user-defined window size
                 df_subset['Moving_Median'] = df_subset['Sales_Quantity'].rolling(window=window_size).median()
                 last_median = df_subset['Moving_Median'].iloc[-1] if not df_subset['Moving_Median'].isnull().all() else 0
                 forecast_values = [last_median] * forecast_days
@@ -354,7 +355,8 @@ def run_full_simulation(
     safety_stock_method, 
     service_level, 
     bom_check,
-    forecast_model
+    forecast_model,
+    ma_window_size # Added ma_window_size here
 ):
     """
     Runs a time-series simulation of the entire supply chain network.
@@ -399,7 +401,7 @@ def run_full_simulation(
     
     if forecast_days > 0:
         st.info(f"Generating a {forecast_days}-day demand forecast using {forecast_model}...")
-        df_forecast = forecast_demand(df_sales, forecast_model, forecast_days)
+        df_forecast = forecast_demand(df_sales, forecast_model, forecast_days, ma_window_size) # Pass ma_window_size
     else:
         st.info("No future forecast period defined by 'Simulation Duration'. Running simulation only on historical data.")
         df_forecast = pd.DataFrame(columns=df_sales.columns)
@@ -473,10 +475,10 @@ def run_full_simulation(
                         order_multiple = lead_time_df_store.iloc[0]['Order_Multiple']
                         
                         order_qty = max(min_order_qty, (avg_daily_demand * lead_time) + ss)
-                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple
+                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple # Changed order_qty calculation based on multiple
                         
                         supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time)
+                        arrival_date = current_date + timedelta(days=int(lead_time)) # Cast to int
                         
                         # Place order with the upstream location
                         demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
@@ -505,7 +507,7 @@ def run_full_simulation(
                 if not lead_time_df_dc.empty:
                     lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
                     destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=lead_time)
+                    arrival_date = current_date + timedelta(days=int(lead_time)) # Cast to int
                     
                     incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
 
@@ -532,10 +534,10 @@ def run_full_simulation(
                         order_multiple = lead_time_df_dc_up.iloc[0]['Order_Multiple']
                         
                         order_qty = max(min_order_qty, (avg_daily_demand_dc * lead_time_up) + random.randint(50, 100))
-                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple
+                        order_qty = math.ceil(order_qty / order_multiple) * order_multiple # Changed order_qty calculation based on multiple
                         
                         supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=lead_time_up)
+                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Cast to int
                         
                         # Place order with the factory
                         # We'll just add it to incoming shipments for now as factories have different logic
@@ -686,6 +688,12 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("Forecasting Parameters")
 forecast_model = st.sidebar.selectbox("Forecasting Model", ["Moving Average", "Moving Median", "Random Forest", "XGBoost"])
 
+# Add input for Moving Average/Moving Median window size
+if forecast_model in ["Moving Average", "Moving Median"]:
+    ma_window_size = st.sidebar.slider("Moving Average/Median Window Size (days)", 1, 30, 7)
+else:
+    ma_window_size = 7 # Default value if not using MA/MM
+
 st.sidebar.markdown("---")
 st.sidebar.subheader("Inventory Policy")
 safety_stock_method = st.sidebar.selectbox("Safety Stock Method", ["King's Method", "Avg Max Method"])
@@ -746,7 +754,8 @@ if run_simulation_button:
                 safety_stock_method,
                 service_level,
                 bom_check,
-                forecast_model
+                forecast_model,
+                ma_window_size # Pass ma_window_size to the simulation
             )
             
             st.markdown("---")
