@@ -17,7 +17,8 @@ warnings.filterwarnings('ignore')
 # --- Configuration for Dummy Data Generation ---
 DEFAULT_NUM_SKUS = 5
 DEFAULT_NUM_COMPONENTS_PER_SKU = 3
-DEFAULT_START_DATE = datetime(2023, 1, 1)
+# Increased date range to ensure enough data points for all roll-ups
+DEFAULT_START_DATE = datetime(2022, 1, 1)
 DEFAULT_END_DATE = datetime(2024, 12, 31)
 DEFAULT_PROMOTION_FREQUENCY_DAYS = 60
 DEFAULT_MAX_LEAD_TIME_DAYS = 30
@@ -25,6 +26,12 @@ DEFAULT_MAX_SKU_SHELF_LIFE_DAYS = 365
 DEFAULT_SALES_CHANNELS = ["Distributor Network", "Amazon", "Own Website"]
 DEFAULT_HOLDING_COST_PER_UNIT_PER_DAY = 0.10
 DEFAULT_ORDERING_COST_PER_ORDER = 50.00
+
+# --- Helper function to convert DataFrame to CSV for download ---
+def get_csv_bytes(df):
+    """Converts a DataFrame to a CSV string and encodes it for download."""
+    csv = df.to_csv(index=False)
+    return csv.encode("utf-8")
 
 # --- Data Generation Functions ---
 @st.cache_data
@@ -182,11 +189,13 @@ def train_and_forecast(model_name, data_df, sku_id, sales_channel, forecast_hori
     if sku_channel_df.empty: return pd.DataFrame()
     sku_channel_df.sort_values('Date', inplace=True)
     
+    # Check if there's enough data for ML models
+    if len(sku_channel_df) < 60 and model_name not in ['Moving Average', 'Moving Median']:
+        st.warning(f"Not enough data for ML model '{model_name}' on SKU {sku_id} ({sales_channel}). Falling back to Moving Average.")
+        model_name = 'Moving Average'
+
     features = [col for col in sku_channel_df.columns if col not in ['Date', 'SKU_ID', 'Sales_Channel', 'Sales_Quantity', 'Promotion_Type']]
     target = 'Sales_Quantity'
-    
-    if len(sku_channel_df) == 0:
-        return pd.DataFrame()
     
     forecast_df = pd.DataFrame()
     last_date = sku_channel_df['Date'].max()
@@ -243,9 +252,12 @@ def run_auto_model_selection(data_df, sku_id, sales_channel, forecast_horizon):
     st.subheader(f"Auto Model Selection for {sku_id} ({sales_channel})")
     
     sku_channel_df = data_df[(data_df['SKU_ID'] == sku_id) & (data_df['Sales_Channel'] == sales_channel)].copy()
-    if sku_channel_df.empty or len(sku_channel_df) < 60:
-        st.warning(f"Not enough data for auto selection on {sku_id} ({sales_channel}).")
-        return None, None
+    
+    # The minimum data needed for a robust test is a certain number of periods
+    min_data_points = 60
+    if len(sku_channel_df) < min_data_points:
+        st.warning(f"Not enough data (need > {min_data_points} periods) for auto selection on {sku_id} ({sales_channel}). Reverting to Moving Average.")
+        return 'Moving Average'
     
     # Use the last 30 periods as the test set to mimic real-world performance
     test_size = 30
@@ -362,6 +374,7 @@ def calculate_inventory_metrics(forecast_df, safety_stock_df, lead_times_df, cos
         holding_cost = sku_cost['Holding_Cost_Per_Unit_Per_Day'].iloc[0]
         unit_cost = sku_cost['Unit_Cost'].iloc[0]
         
+        # This will need to handle a mix of daily and other rollups
         lead_time_demand = sku_forecast['Forecasted_Quantity'].head(lead_time_days).sum()
         reorder_point = lead_time_demand + safety_stock
         
@@ -412,8 +425,8 @@ def calculate_kpis(sales_df, forecast_df, inventory_df):
     # 2. Stockout Rate
     stockout_rates = []
     for sku_id in sales_df['SKU_ID'].unique():
-        sku_sales = sales_df[sales_df['SKU_ID'] == sku_id]
-        sku_inventory = inventory_df[inventory_df['Item_ID'] == sku_id]
+        sku_sales = sales_df[sales_df['SKU_ID'] == sku_id].copy()
+        sku_inventory = inventory_df[inventory_df['Item_ID'] == sku_id].copy()
         
         if sku_sales.empty or sku_inventory.empty: continue
             
@@ -444,7 +457,7 @@ def main():
     st.set_page_config(layout="wide", page_title="Demand & Inventory Intelligence")
     st.title("Demand and Inventory Intelligence")
     st.subheader("A Comprehensive Forecasting and Optimization Solution")
-    
+
     # --- Session State Initialization ---
     if 'data_loaded' not in st.session_state:
         st.session_state.data_loaded = False
@@ -453,9 +466,36 @@ def main():
         st.session_state.kpi_results = {}
         st.session_state.best_model = None
 
-    # --- Sidebar ---
+    # --- Data Template Download Section ---
+    st.header("1. Download Data Templates")
+    st.markdown("Download these CSV templates to prepare your own data for a complete analysis.")
+
+    # Generate a small, representative set of data just for the templates
+    template_data = generate_all_sample_data(num_skus=1, num_components_per_sku=1, start_date=datetime(2024, 1, 1), end_date=datetime(2024, 2, 29))
+    
+    template_columns = st.columns(4)
+    with template_columns[0]:
+        st.download_button(label="Sales Data", data=get_csv_bytes(template_data['sales_df']), file_name="sales_data_template.csv", mime="text/csv")
+    with template_columns[1]:
+        st.download_button(label="Inventory Data", data=get_csv_bytes(template_data['inventory_df']), file_name="inventory_data_template.csv", mime="text/csv")
+    with template_columns[2]:
+        st.download_button(label="BOM", data=get_csv_bytes(template_data['bom_df']), file_name="bom_template.csv", mime="text/csv")
+    with template_columns[3]:
+        st.download_button(label="Promotions", data=get_csv_bytes(template_data['promo_df']), file_name="promotions_template.csv", mime="text/csv")
+        
+    template_columns_2 = st.columns(3)
+    with template_columns_2[0]:
+        st.download_button(label="External Factors", data=get_csv_bytes(template_data['external_factors_df']), file_name="external_factors_template.csv", mime="text/csv")
+    with template_columns_2[1]:
+        st.download_button(label="Lead Times", data=get_csv_bytes(template_data['lead_times_df']), file_name="lead_times_template.csv", mime="text/csv")
+    with template_columns_2[2]:
+        st.download_button(label="Cost Config", data=get_csv_bytes(template_data['cost_config_df']), file_name="cost_config_template.csv", mime="text/csv")
+    
+    st.markdown("---")
+
+    # --- Sidebar for Data Loading and Parameters ---
     with st.sidebar:
-        st.header("Data & Parameters")
+        st.header("2. Data & Parameters")
         data_source = st.radio("Choose Data Source", ("Run on Sample Data", "Upload Your Own"))
         
         if data_source == "Run on Sample Data":
@@ -463,9 +503,7 @@ def main():
             num_skus = st.slider("Number of SKUs", 1, 20, DEFAULT_NUM_SKUS)
             num_components = st.slider("Components per SKU", 1, 10, DEFAULT_NUM_COMPONENTS_PER_SKU)
             if st.button("Generate and Load Sample Data"):
-                data = generate_all_sample_data(num_skus, num_components, DEFAULT_START_DATE, DEFAULT_END_DATE)
-                for key, df in data.items():
-                    st.session_state[key] = df
+                st.session_state.data = generate_all_sample_data(num_skus, num_components, DEFAULT_START_DATE, DEFAULT_END_DATE)
                 st.session_state.data_loaded = True
                 
         else: # Upload Your Own
@@ -482,8 +520,7 @@ def main():
             if st.button("Load Uploaded Data"):
                 if all(uploaded_files.values()):
                     try:
-                        for key, file in uploaded_files.items():
-                            st.session_state[key] = pd.read_csv(file)
+                        st.session_state.data = {key: pd.read_csv(file) for key, file in uploaded_files.items()}
                         st.session_state.data_loaded = True
                         st.success("All data files loaded successfully!")
                     except Exception as e:
@@ -503,8 +540,10 @@ def main():
         if st.sidebar.button("Run Analysis"):
             with st.spinner("Processing data and running models..."):
                 preprocessed_data = preprocess_data(
-                    st.session_state.sales_df, st.session_state.promo_df,
-                    st.session_state.external_factors_df, forecast_roll_up_choice
+                    st.session_state.data['sales_df'],
+                    st.session_state.data['promo_df'],
+                    st.session_state.data['external_factors_df'],
+                    forecast_roll_up_choice
                 )
                 
                 unique_skus = preprocessed_data['SKU_ID'].unique()
@@ -512,8 +551,11 @@ def main():
                 
                 all_forecasts = []
                 best_model_for_all = {}
+
+                # The main loop is now robust and iterates through ALL SKUs and Channels
                 for sku in unique_skus:
                     for channel in unique_channels:
+                        st.info(f"Processing SKU: {sku}, Channel: {channel}")
                         if selected_model == "Auto":
                             best_model_name = run_auto_model_selection(preprocessed_data, sku, channel, forecast_horizon)
                             if best_model_name:
@@ -537,12 +579,12 @@ def main():
                     st.success("Forecasting complete!")
                     
                     st.subheader("Running Inventory Optimization...")
-                    st.session_state.safety_stock_df = calculate_safety_stock(st.session_state.sales_df, st.session_state.lead_times_df, service_level, forecast_roll_up_choice)
-                    st.session_state.inventory_cost_df = calculate_inventory_metrics(st.session_state.forecast_df, st.session_state.safety_stock_df, st.session_state.lead_times_df, st.session_state.cost_config_df)
+                    st.session_state.safety_stock_df = calculate_safety_stock(st.session_state.data['sales_df'], st.session_state.data['lead_times_df'], service_level, forecast_roll_up_choice)
+                    st.session_state.inventory_cost_df = calculate_inventory_metrics(st.session_state.forecast_df, st.session_state.safety_stock_df, st.session_state.data['lead_times_df'], st.session_state.data['cost_config_df'])
                     st.success("Inventory optimization complete!")
                     
                     st.subheader("Calculating KPIs...")
-                    st.session_state.kpi_results = calculate_kpis(st.session_state.sales_df, st.session_state.forecast_df, st.session_state.inventory_df)
+                    st.session_state.kpi_results = calculate_kpis(st.session_state.data['sales_df'], st.session_state.forecast_df, st.session_state.data['inventory_df'])
                     st.success("KPIs calculated!")
                 else:
                     st.error("No forecasts were generated. Please check your data and parameters.")
@@ -554,8 +596,8 @@ def main():
         with tab1:
             st.header("Demand Planning")
             if not st.session_state.forecast_df.empty:
-                unique_skus_for_plot = st.session_state.sales_df['SKU_ID'].unique()
-                unique_channels_for_plot = st.session_state.sales_df['Sales_Channel'].unique()
+                unique_skus_for_plot = st.session_state.data['sales_df']['SKU_ID'].unique()
+                unique_channels_for_plot = st.session_state.data['sales_df']['Sales_Channel'].unique()
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -563,10 +605,11 @@ def main():
                 with col2:
                     selected_channel_for_plot = st.selectbox("Select Sales Channel", unique_channels_for_plot)
                 
-                historical_sales = st.session_state.sales_df[(st.session_state.sales_df['SKU_ID'] == selected_sku_for_plot) & (st.session_state.sales_df['Sales_Channel'] == selected_channel_for_plot)]
+                historical_sales = st.session_state.data['sales_df'][(st.session_state.data['sales_df']['SKU_ID'] == selected_sku_for_plot) & (st.session_state.data['sales_df']['Sales_Channel'] == selected_channel_for_plot)]
                 forecast_sales = st.session_state.forecast_df[(st.session_state.forecast_df['SKU_ID'] == selected_sku_for_plot) & (st.session_state.forecast_df['Sales_Channel'] == selected_channel_for_plot)]
                 
                 if not historical_sales.empty and not forecast_sales.empty:
+                    # Preprocess historical sales for consistent plotting
                     historical_sales.set_index('Date', inplace=True)
                     historical_sales = historical_sales.resample('D')['Sales_Quantity'].sum().reset_index()
                     
@@ -610,11 +653,11 @@ def main():
                 col3.metric("Inventory Turnover", st.session_state.kpi_results.get('Inventory Turnover', 'N/A'))
                 
                 st.subheader("Inventory Level over Time")
-                if not st.session_state.inventory_df.empty:
-                    unique_skus_for_inv_plot = st.session_state.inventory_df['Item_ID'].unique()
+                if not st.session_state.data['inventory_df'].empty:
+                    unique_skus_for_inv_plot = st.session_state.data['inventory_df']['Item_ID'].unique()
                     selected_sku_for_inv_plot = st.selectbox("Select SKU to view Inventory", unique_skus_for_inv_plot, key='inv_level_plot_sku')
                     
-                    inventory_plot_df = st.session_state.inventory_df[st.session_state.inventory_df['Item_ID'] == selected_sku_for_inv_plot]
+                    inventory_plot_df = st.session_state.data['inventory_df'][st.session_state.data['inventory_df']['Item_ID'] == selected_sku_for_inv_plot]
                     if not inventory_plot_df.empty:
                         fig_inv_level = px.line(inventory_plot_df, x="Date", y="Current_Stock", title=f"Inventory Level for {selected_sku_for_inv_plot}")
                         st.plotly_chart(fig_inv_level, use_container_width=True)
