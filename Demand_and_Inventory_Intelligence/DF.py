@@ -781,7 +781,19 @@ if run_simulation_button:
                 # Add a vertical line for the forecast start
                 if not df_sales.empty:
                     forecast_start_vline_x = df_sales['Date'].max()
-                    fig.add_vline(x=forecast_start_vline_x, line_dash="dash", line_color="red", annotation_text="Forecast Start", annotation_position="top right")
+                    # Removed annotation_text and annotation_position to avoid TypeError
+                    fig.add_vline(x=forecast_start_vline_x, line_dash="dash", line_color="red")
+                    # Optionally, add annotation separately if needed and if it doesn't cause issues
+                    fig.add_annotation(
+                        x=forecast_start_vline_x,
+                        y=1.05, # Y-position in 'paper' coordinates (0 to 1) for top of plot
+                        xref="x",
+                        yref="paper",
+                        text="Forecast Start",
+                        showarrow=False,
+                        font=dict(color="red"),
+                        xanchor="left" # Adjust anchor for better positioning
+                    )
                 else:
                     st.warning("Cannot show forecast start line as historical sales data is empty.")
                                         
