@@ -358,7 +358,8 @@ def run_full_simulation(
     safety_stock_method, 
     service_level, 
     bom_check,
-    forecast_model
+    forecast_model,
+    forecast_duration_days # Added new parameter
 ):
     """
     Runs a time-series simulation of the entire supply chain network.
@@ -396,20 +397,19 @@ def run_full_simulation(
     # Pre-process sales data for quick lookup
     df_sales['Date'] = pd.to_datetime(df_sales['Date'])
     
-    # Generate forecast demand for the simulation period
-    forecast_start_date = df_sales['Date'].max() + timedelta(days=1)
-    forecast_end_date = end_date
-    forecast_days = (forecast_end_date - forecast_start_date).days + 1
-    
-    if forecast_days > 0:
-        st.info(f"Generating a {forecast_days}-day demand forecast using {forecast_model}...")
-        df_forecast = forecast_demand(df_sales, forecast_model, forecast_days)
+    # Generate forecast demand for the specified forecast duration
+    if forecast_duration_days > 0:
+        st.info(f"Generating a {forecast_duration_days}-day demand forecast using {forecast_model}...")
+        df_forecast = forecast_demand(df_sales, forecast_model, forecast_duration_days)
     else:
-        st.info("No forecast needed as simulation period is within historical data.")
-        df_forecast = pd.DataFrame(columns=df_sales.columns)
+        st.info("No forecast needed.")
+        df_forecast = pd.DataFrame(columns=df_sales.columns) # Empty DataFrame if no forecast needed
     
     # Combine historical and forecast data for simulation
+    # Ensure df_sim_demand only contains data within the overall simulation period (start_date to end_date)
     df_sim_demand = pd.concat([df_sales, df_forecast]).sort_values('Date').reset_index(drop=True)
+    df_sim_demand = df_sim_demand[(df_sim_demand['Date'] >= start_date) & (df_sim_demand['Date'] <= end_date)].copy()
+    
     sim_demand_by_date = df_sim_demand.groupby('Date')
 
     # Simulation loop
@@ -464,6 +464,7 @@ def run_full_simulation(
                     
                     # Calculate reorder point and order quantity
                     if safety_stock_method == "King's Method":
+                        # Use df_sim_demand for safety stock calculation to include forecast
                         ss = calculate_safety_stock_kings(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time, service_level / 100)
                     else:
                         ss = calculate_safety_stock_avg_max(df_sim_demand[(df_sim_demand['SKU_ID'] == sku) & (df_sim_demand['Location'] == location)], lead_time)
@@ -480,7 +481,7 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_store.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time)) # Fix applied here
+                        arrival_date = current_date + timedelta(days=int(lead_time))
                         
                         # Place order with the upstream location
                         demand_for_today[(supplier, sku)] = demand_for_today.get((supplier, sku), 0) + order_qty
@@ -509,7 +510,7 @@ def run_full_simulation(
                 if not lead_time_df_dc.empty:
                     lead_time = lead_time_df_dc.iloc[0]['Lead_Time_Days']
                     destination_location = lead_time_df_dc.iloc[0]['To_Location'] # This logic is simplistic, assuming one-to-one
-                    arrival_date = current_date + timedelta(days=int(lead_time)) # Fix applied here
+                    arrival_date = current_date + timedelta(days=int(lead_time))
                     
                     incoming_shipments.setdefault(arrival_date, {}).setdefault((destination_location, item), []).append(shipped_qty)
 
@@ -539,7 +540,7 @@ def run_full_simulation(
                         order_qty = math.ceil(order_qty / order_multiple) * order_multiple
                         
                         supplier = lead_time_df_dc_up.iloc[0]['From_Location']
-                        arrival_date = current_date + timedelta(days=int(lead_time_up)) # Fix applied here
+                        arrival_date = current_date + timedelta(days=int(lead_time_up))
                         
                         # Place order with the factory
                         # We'll just add it to incoming shipments for now as factories have different logic
@@ -689,6 +690,7 @@ simulation_days = st.sidebar.slider("Simulation Duration (days)", 30, 365, 90)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Forecasting Parameters")
 forecast_model = st.sidebar.selectbox("Forecasting Model", ["Moving Average", "Moving Median", "Random Forest", "XGBoost"])
+forecast_duration_days = st.sidebar.slider("Forecast Duration (days beyond historical data)", 0, 365, 30) # New slider
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Inventory Policy")
@@ -741,7 +743,8 @@ if run_simulation_button:
                 safety_stock_method,
                 service_level,
                 bom_check,
-                forecast_model
+                forecast_model,
+                forecast_duration_days # Pass the new parameter
             )
             
             st.markdown("---")
